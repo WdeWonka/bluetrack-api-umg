@@ -1,0 +1,96 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.pyc
+test_db.py
+
+# Compilación / paquetes
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# Configuración de entorno
+.env
+.env.development
+.env.production
+.env.test
+
+# Archivos de logs y runtime
+*.log
+*.pid
+*.seed
+*.out
+
+# Jupyter / IPython
+.ipynb_checkpoints
+*.ipynb
+
+# Archivos temporales y cache
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.cache/
+pytest_cache/
+__snapshots__/
+
+# Configuración de herramientas / IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Dependencias locales
+pip-wheel-metadata/
+site/
+
+# Coverage / tests
+htmlcov/
+.tox/
+.nox/
+.coverage
+coverage.xml
+
+# MyPy / Pylint / Pyright
+.mypy_cache/
+.dmypy.json
+.pyre/
+.pytype/
+
+# Bases de datos locales
+*.sqlite3
+*.db
+*.sqlite
+
+# Archivos de exportación / resultados
+outputs/
+exports/
+reports/
+tmp/
+temp/
+
+# === Seguridad ===
+# No subir claves ni configuraciones privadas
+secrets/
+keys/
+jwt_secret.txt
+*.pem
+*.key
+
+# === Docker ===
+docker-compose.override.yml
+Dockerfile.dev
+*.bak
+*.tmp
