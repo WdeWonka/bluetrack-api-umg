@@ -8,8 +8,9 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 
 from src.modules.administration.controller import router as admin_router
-from src.modules.sellers.controller import router as sellers_router
-from src.modules.operators.controller import router as operator_router
+# from src.modules.sellers.controller import router as sellers_router
+# from src.modules.operators.controller import router as operator_router
+from src.modules.staff.controller import router as staff_router
 from src.modules.warehouses.controller import router as warehouses_router
 from src.modules.customers.controller import router as customers_router
 from src.modules.products.controller import router as products_router
@@ -28,13 +29,7 @@ app = FastAPI(
     description="API REST para gestión de entregas, rutas y logística",
     docs_url="/docs",
     redoc_url="/redoc",
-    contact={
-        "name": "DeliverIt Team",
-        "email": "soporte@deliverit.com",
-    },
-    license_info={
-        "name": "MIT",
-    }
+
 )
 
 # =========================================
@@ -44,14 +39,20 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",      # Next.js development
+        "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "https://tu-dominio.com",     # Producción (cambiar cuando despliegues)
     ],
-    allow_credentials=True,           # Permite cookies/auth headers
-    allow_methods=["*"],              # GET, POST, PUT, DELETE, etc.
-    allow_headers=["*"],              # Permite todos los headers
-    expose_headers=["*"],             # Expone headers en las respuestas
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],  # 🔑 Explícito
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "Accept",
+        "Cookie",  # 🔑 IMPORTANTE para cookies
+        "Set-Cookie",  # 🔑 IMPORTANTE para cookies
+    ],
+    expose_headers=["Set-Cookie"],  # 🔑 Expone Set-Cookie al frontend
+    max_age=3600,  # Cache preflight requests por 1 hora
 )
 
 # =========================================
@@ -92,13 +93,9 @@ async def general_exception_handler(request: Request, exc: Exception):
 # ROUTERS
 # =========================================
 
-# 🔐 Autenticación (siempre primero)
 app.include_router(auth_router)
-
-# 📦 Módulos principales
 app.include_router(admin_router)
-app.include_router(sellers_router)
-app.include_router(operator_router)
+app .include_router(staff_router)
 app.include_router(warehouses_router)
 app.include_router(customers_router)
 app.include_router(products_router)

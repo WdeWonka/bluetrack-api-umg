@@ -18,13 +18,16 @@ from src.utils.excel_formatter import ExcelImportError, create_template_excel
 from src.modules.products.type import ProductCreate, ProductUpdate, ProductRead
 from src.utils.http_response import HttpResponse
 from src.utils.type_converters import decimal_to_str
+from src.modules.auth.dependencies import require_role
+from src.common.constants.roles import ADMIN
 import logging
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/products",
-    tags=["products"]
+    tags=["products"],
+    dependencies=[Depends(require_role([ADMIN]))]
 )
 
 

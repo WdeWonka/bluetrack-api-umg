@@ -20,9 +20,11 @@ from src.modules.routes.inventory_service import (
     InsufficientStockError
 )
 from db.deps import get_db
+from src.modules.auth.dependencies import require_role
+from src.common.constants.roles import ADMIN, OPERATOR, SELLER
 from src.utils.http_response import HttpResponse
 
-router = APIRouter(prefix="/routes", tags=["routes"])
+router = APIRouter(prefix="/routes", tags=["routes"], dependencies=[Depends(require_role([ADMIN, OPERATOR, SELLER]))])
 logger = logging.getLogger(__name__)
 
 

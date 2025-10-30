@@ -18,13 +18,16 @@ from src.utils.excel_formatter import ExcelImportError, create_template_excel
 from src.modules.customers.type import CustomerCreate, CustomerUpdate, CustomerRead
 from src.utils.type_converters import decimal_to_float
 from src.utils.http_response import HttpResponse
+from src.modules.auth.dependencies import require_role
+from src.common.constants.roles import ADMIN
 import logging
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/customers",
-    tags=["customers"]
+    tags=["customers"],
+    dependencies=[Depends(require_role(ADMIN))]
 )
 
 
@@ -50,12 +53,12 @@ def api_create_customer(
         db.rollback()
         logger.error(f"Integrity error creating customer: {str(ie)}")
         return HttpResponse.conflict(error="El cliente ya existe en la base de datos")
-    
+
     except SQLAlchemyError as se:
         db.rollback()
         logger.error(f"Database error creating customer: {str(se)}")
         return HttpResponse.internal_server_error(error="Error de base de datos al crear el cliente")
-    
+
     except Exception as e:
         db.rollback()
         logger.exception(f"Unexpected error creating customer: {str(e)}")
@@ -119,7 +122,7 @@ def api_search_customers(
     except SQLAlchemyError as se:
         logger.error(f"Database error searching customers with query '{q}': {str(se)}")
         return HttpResponse.internal_server_error(error="Error de base de datos al buscar clientes")
-    
+
     except Exception as e:
         logger.exception(f"Unexpected error searching customers with query '{q}': {str(e)}")
         return HttpResponse.internal_server_error(error="Ocurrió un error inesperado al buscar clientes")
@@ -147,20 +150,20 @@ async def api_import_customers(
     if not file.filename:
         logger.warning("File uploaded without filename")
         return HttpResponse.bad_request(error="El archivo no tiene nombre")
-    
+
     # Validar extensión del archivo
     if not file.filename.endswith(('.xlsx', '.xls')):
         logger.warning(f"Invalid file type uploaded: {file.filename}")
         return HttpResponse.bad_request(
             error="Tipo de archivo inválido. Por favor sube un archivo Excel (.xlsx o .xls)"
         )
-    
+
     try:
         created_customers, validation_errors, db_errors = import_customers_from_excel(
             file=file,
             db=db,
         )
-        
+
         if not validation_errors and not db_errors:
             logger.info(f"All {len(created_customers)} customers imported successfully")
             return HttpResponse.custom(
@@ -172,15 +175,15 @@ async def api_import_customers(
                             "nombre": customer.nombre,
                             "direccion": customer.direccion,
                             "telefono": customer.telefono,
-                            "latitud": decimal_to_float(customer.latitud),  
-                            "longitud": decimal_to_float(customer.longitud) 
+                            "latitud": decimal_to_float(customer.latitud),
+                            "longitud": decimal_to_float(customer.longitud)
                         }
                         for customer in created_customers
                     ]
                 },
                 status_code=201
             )
-        
+
         elif validation_errors and not db_errors:
             logger.warning(f"Import failed with {len(validation_errors)} validation errors")
             return HttpResponse.custom(
@@ -191,7 +194,7 @@ async def api_import_customers(
                 },
                 status_code=422
             )
-        
+
         else:
             logger.info(f"Partial import: {len(created_customers)} created, {len(db_errors)} failed")
             return HttpResponse.custom(
@@ -204,7 +207,7 @@ async def api_import_customers(
                             "nombre": customer.nombre,
                             "direccion": customer.direccion,
                             "telefono": customer.telefono,
-                            "latitud": decimal_to_float(customer.latitud),  
+                            "latitud": decimal_to_float(customer.latitud),
                             "longitud": decimal_to_float(customer.longitud)
                         }
                         for customer in created_customers
@@ -214,11 +217,11 @@ async def api_import_customers(
                 status_code=200
             )
 
-    
+
     except ExcelImportError as e:
         logger.error(f"Excel import error: {str(e)}")
         return HttpResponse.bad_request(error=str(e))
-    
+
     except Exception as e:
         logger.exception(f"Unexpected error during import: {str(e)}")
         return HttpResponse.internal_server_error(
@@ -230,7 +233,7 @@ async def api_import_customers(
     summary="Export all customers to Excel",
     response_description="Excel file with all customers"
 )
-def api_export_customers_excel(db: Session = Depends(get_db)):  
+def api_export_customers_excel(db: Session = Depends(get_db)):
     """
     Export all customers to an Excel file.
 
@@ -240,7 +243,7 @@ def api_export_customers_excel(db: Session = Depends(get_db)):
     """
     try:
         excel_content = export_customers_to_excel(db)
-        
+
         logger.info("Customers exported to Excel successfully")
         return Response(
             content=excel_content,
@@ -249,7 +252,7 @@ def api_export_customers_excel(db: Session = Depends(get_db)):
                 "Content-Disposition": "attachment; filename=clientes.xlsx"
             }
         )
-    
+
     except Exception as e:
         logger.exception(f"Error exporting customers to Excel: {str(e)}")
         return HttpResponse.internal_server_error(
@@ -265,23 +268,23 @@ def api_export_customers_excel(db: Session = Depends(get_db)):
 def api_export_customers_pdf(db: Session = Depends(get_db)):
     """
     Export all customers to a PDF report.
-    
+
     **Returns:**
     - PDF file with formatted table
     - Columns: Nombre, Dirección, Teléfono, Latitud, Longitud
     """
     try:
         pdf_content = export_customers_to_pdf(db)
-        
+
         logger.info("Customers exported to PDF successfully")
         return Response(
             content=pdf_content,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": "attachment; filename=reporte_clientes.pdf"  
+                "Content-Disposition": "attachment; filename=reporte_clientes.pdf"
             }
         )
-    
+
     except Exception as e:
         logger.exception(f"Error exporting customers to PDF: {str(e)}")
         return HttpResponse.internal_server_error(
@@ -296,11 +299,11 @@ def api_export_customers_pdf(db: Session = Depends(get_db)):
 def api_download_customer_template():
     """
     Download an Excel template for bulk customer import.
-    
+
     **Returns:**
     - Excel template with required columns and example data
     - Use this template to prepare your bulk import file
-    
+
     **Columns:**
     - nombre: Customer name
     - direccion: Complete address
@@ -336,7 +339,7 @@ def api_download_customer_template():
             ],
             filename="template_clientes.xlsx"
         )
-        
+
         logger.info("Customer template downloaded successfully")
         return Response(
             content=template.getvalue(),
@@ -345,7 +348,7 @@ def api_download_customer_template():
                 "Content-Disposition": "attachment; filename=template_clientes.xlsx"
             }
         )
-    
+
     except Exception as e:
         logger.exception(f"Error creating customer template: {str(e)}")
         return HttpResponse.internal_server_error(
@@ -408,7 +411,7 @@ def api_update_customer(
         db.rollback()
         logger.error(f"Database error updating customer {customer_id}: {str(se)}")
         return HttpResponse.internal_server_error(error="Error de base de datos al actualizar el cliente")
-    
+
     except Exception as e:
         db.rollback()
         logger.exception(f"Unexpected error updating customer {customer_id}: {str(e)}")
@@ -468,7 +471,7 @@ def api_list_customers(
     except SQLAlchemyError as se:
         logger.error(f"Database error listing customers: {str(se)}")
         return HttpResponse.internal_server_error(error="Error de base de datos al listar clientes")
-    
+
     except Exception as e:
         logger.exception(f"Unexpected error listing customers: {str(e)}")
         return HttpResponse.internal_server_error(error="Ocurrió un error inesperado al listar clientes")

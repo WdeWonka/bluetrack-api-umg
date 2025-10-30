@@ -4,9 +4,9 @@ from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
 from db.deps import get_db
 from src.modules.sellers.service import (
-    create_user, 
-    get_user, 
-    update_user, 
+    create_user,
+    get_user,
+    update_user,
     list_users,
     search_users,
     count_users,
@@ -14,7 +14,7 @@ from src.modules.sellers.service import (
     import_users_from_excel,
     export_users_to_excel,
     export_users_to_pdf
-    
+
 )
 
 from src.utils.excel_formatter import ExcelImportError, create_template_excel
@@ -23,6 +23,9 @@ from src.utils.excel_formatter import ExcelImportError, create_template_excel
 from src.common.types.userType import UserCreate, UserUpdate, UserRead
 from src.common.constants.roles import OPERATOR
 from src.utils.http_response import HttpResponse
+from src.modules.auth.dependencies import require_role
+from src.common.constants.roles import ADMIN
+
 import logging
 
 logger = logging.getLogger(__name__)
@@ -30,7 +33,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/operator",
-    tags=["operator"]
+    tags=["operator"],
+    dependencies=[Depends(require_role(ADMIN))]
 )
 @router.post(
     "/users",
@@ -45,24 +49,24 @@ def api_create_user(
         user = create_user(db, user_data, role=OPERATOR)
         logger.info(f"User created successfully: {user.email}")
         return HttpResponse.created(response=UserRead.model_validate(user).model_dump(mode='json'))
-        
+
     except ValueError as ve:
         # Error de validación (contraseña)
         logger.error(f"Validation error creating user: {str(ve)}")
         return HttpResponse.unprocessable_entity(error=str(ve))
-    
+
     except IntegrityError as ie:
         # Error de integridad (usuario duplicado)
         db.rollback()
         logger.error(f"Integrity error creating user: {str(ie)}")
         return HttpResponse.conflict(error="El usuario ya existe en la base de datos (email o DPI duplicado)")
-    
+
     except SQLAlchemyError as se:
         # Otros errores de base de datos
         db.rollback()
         logger.error(f"Database error creating user: {str(se)}")
         return HttpResponse.internal_server_error(error="Error de base de datos al crear el usuario")
-    
+
     except Exception as e:
         # Errores inesperados
         db.rollback()
@@ -84,11 +88,11 @@ def api_search_users(
 ):
     """
     Search users by name or DPI with pagination.
-    
+
     - **q**: Search query (name or DPI)
     - **page**: Page number (starts at 1)
     - **per_page**: Number of items per page (default: 5, max: 50)
-    
+
     Example: /admin/users/search?q=Juan&page=1&per_page=5
     """
     try:
@@ -116,7 +120,7 @@ def api_search_users(
 
         total_results = count_search_results(db, query=q, role=OPERATOR)
         total_pages = (total_results + per_page - 1) // per_page
-        
+
         logger.info(f"Found {len(results)} users for search query: {q}")
         return HttpResponse.success(
             message=f"Found {total_results} users matching '{q}'",
@@ -133,11 +137,11 @@ def api_search_users(
                 }
             }
         )
-    
+
     except SQLAlchemyError as se:
         logger.error(f"Database error searching users with query '{q}': {str(se)}")
         return HttpResponse.internal_server_error(error="Error de base de datos al buscar usuarios")
-        
+
     except Exception as e:
         logger.exception(f"Unexpected error searching users with query '{q}': {str(e)}")
         return HttpResponse.internal_server_error(error="An unexpected error occurred while searching users")
@@ -161,21 +165,21 @@ async def api_import_operators(
     if not file.filename:
         logger.warning("File uploaded without filename")
         return HttpResponse.bad_request(error="El archivo no tiene nombre")
-    
+
     # Validar extensión del archivo
     if not file.filename.endswith(('.xlsx', '.xls')):
         logger.warning(f"Invalid file type uploaded: {file.filename}")
         return HttpResponse.bad_request(
             error="Tipo de archivo inválido. Por favor sube un archivo Excel (.xlsx o .xls)"
         )
-    
+
     try:
         created_users, validation_errors, db_errors = import_users_from_excel(
             file=file,
             db=db,
             role=OPERATOR
         )
-        
+
         if not validation_errors and not db_errors:
             logger.info(f"All {len(created_users)} operators imported successfully")
             return HttpResponse.custom(
@@ -193,7 +197,7 @@ async def api_import_operators(
                 },
                 status_code=201
             )
-        
+
         elif validation_errors and not db_errors:
             logger.warning(f"Import failed with {len(validation_errors)} validation errors")
             return HttpResponse.custom(
@@ -204,7 +208,7 @@ async def api_import_operators(
                 },
                 status_code=422
             )
-        
+
         else:
             logger.info(f"Partial import: {len(created_users)} created, {len(db_errors)} failed")
             return HttpResponse.custom(
@@ -214,7 +218,7 @@ async def api_import_operators(
                     "error_count": len(db_errors),
                     "created_users": [
                         {
-                            
+
                             "nombre": user.nombre,
                             "email": user.email,
                             "dpi": user.dpi
@@ -225,18 +229,18 @@ async def api_import_operators(
                 },
                 status_code=200
             )
-    
+
     except ExcelImportError as e:
         logger.error(f"Excel import error: {str(e)}")
         return HttpResponse.bad_request(error=str(e))
-    
+
     except Exception as e:
         logger.exception(f"Unexpected error during import: {str(e)}")
         return HttpResponse.internal_server_error(
             error="Ocurrió un error inesperado al procesar el archivo"
         )
-    
-    
+
+
 @router.get(
     "/users/export/excel",
     summary="Export all users to Excel",
@@ -253,7 +257,7 @@ def api_export_users(db: Session = Depends(get_db)):
     """
     try:
         excel_content = export_users_to_excel(db, role=OPERATOR)
-        
+
         logger.info("Users exported to Excel successfully")
         return Response(
             content=excel_content,
@@ -262,7 +266,7 @@ def api_export_users(db: Session = Depends(get_db)):
                 "Content-Disposition": "attachment; filename=usuarios_operadores.xlsx"
             }
         )
-    
+
     except Exception as e:
         logger.exception(f"Error exporting users: {str(e)}")
         return HttpResponse.internal_server_error(
@@ -277,14 +281,14 @@ def api_export_users(db: Session = Depends(get_db)):
 def api_export_operators_pdf(db: Session = Depends(get_db)):
     """
     Export all operator users to a PDF report.
-    
+
     **Returns:**
     - PDF file with formatted table
     - Columns: Nombre, DPI, Email, Rol
     """
     try:
         pdf_content = export_users_to_pdf(db, role=OPERATOR)
-        
+
         logger.info("Operators exported to PDF successfully")
         return Response(
             content=pdf_content,
@@ -293,7 +297,7 @@ def api_export_operators_pdf(db: Session = Depends(get_db)):
                 "Content-Disposition": "attachment; filename=reporte_operadores.pdf"
             }
         )
-    
+
     except Exception as e:
         logger.exception(f"Error exporting operators to PDF: {str(e)}")
         return HttpResponse.internal_server_error(
@@ -310,7 +314,7 @@ def api_export_operators_pdf(db: Session = Depends(get_db)):
 def api_download_template():
     """
     Download an Excel template for bulk user import.
-    
+
     **Returns:**
     - Excel template with required columns and example data
     - Use this template to prepare your bulk import file
@@ -334,7 +338,7 @@ def api_download_template():
             ],
             filename="template_usuarios.xlsx"
         )
-        
+
         logger.info("Template downloaded successfully")
         return Response(
             content=template.getvalue(),
@@ -343,7 +347,7 @@ def api_download_template():
                 "Content-Disposition": "attachment; filename=template_usuarios.xlsx"
             }
         )
-    
+
     except Exception as e:
         logger.exception(f"Error creating template: {str(e)}")
         return HttpResponse.internal_server_error(
@@ -362,26 +366,26 @@ def api_get_user(
 ):
     """
     Retrieve a specific user by their ID.
-    
+
     - **user_id**: The ID of the user to retrieve
     """
     try:
         user = get_user(db, user_id)
-        
+
         if not user:
             logger.warning(f"User not found with ID: {user_id}")
             return HttpResponse.not_found(error=f"User with ID {user_id} does not exist")
-        
+
         logger.info(f"User retrieved successfully with ID: {user_id}")
         return HttpResponse.success(
-            message="User retrieved successfully", 
+            message="User retrieved successfully",
             response=UserRead.model_validate(user).model_dump(mode='json')
         )
-        
+
     except ValueError as ve:
         logger.error(f"Invalid user ID: {str(ve)}")
         return HttpResponse.bad_request(error="Invalid user ID format")
-    
+
     except Exception as e:
         logger.exception(f"Unexpected error retrieving user {user_id}: {str(e)}")
         return HttpResponse.internal_server_error(error="An unexpected error occurred while retrieving the user")
@@ -399,35 +403,35 @@ def api_update_user(
 ):
     """
     Update an existing user's information.
-    
+
     - **user_id**: The ID of the user to update
     - **user_data**: Updated user information
     """
     try:
         user = update_user(db, user_id, user_data)
-        
+
         if not user:
             logger.warning(f"User not found for update with ID: {user_id}")
             return HttpResponse.not_found(error=f"User with ID {user_id} does not exist")
-        
+
         logger.info(f"User updated successfully with ID: {user_id}")
         return HttpResponse.updated(response=UserRead.model_validate(user).model_dump(mode='json'))
-        
+
     except ValueError as ve:
         db.rollback()
         logger.error(f"Validation error updating user {user_id}: {str(ve)}")
         return HttpResponse.unprocessable_entity(error=str(ve))
-    
+
     except IntegrityError as ie:
         db.rollback()
         logger.error(f"Integrity error updating user {user_id}: {str(ie)}")
         return HttpResponse.conflict(error="Email o DPI duplicado")
-    
+
     except SQLAlchemyError as se:
         db.rollback()
         logger.error(f"Database error updating user {user_id}: {str(se)}")
         return HttpResponse.internal_server_error(error="Error de base de datos al actualizar el usuario")
-    
+
     except Exception as e:
         db.rollback()
         logger.exception(f"Unexpected error updating user {user_id}: {str(e)}")
@@ -446,10 +450,10 @@ def api_list_users(
 ):
     """
     Retrieve a paginated list of all users.
-    
+
     - **page**: Page number (starts at 1)
     - **per_page**: Number of items per page (default: 10, max: 100)
-    
+
     Example: /admin/users?page=1&per_page=10
     """
     try:
@@ -476,7 +480,7 @@ def api_list_users(
 
         total_users = count_users(db, role=OPERATOR)
         total_pages = (total_users + per_page - 1) // per_page
-        
+
         logger.info(f"Retrieved {len(users)} users for page {page}")
         return HttpResponse.success(
             message=f"Retrieved {len(users)} users successfully",
@@ -492,11 +496,11 @@ def api_list_users(
                 }
             }
         )
-    
+
     except SQLAlchemyError as se:
         logger.error(f"Database error listing users: {str(se)}")
         return HttpResponse.internal_server_error(error="Error de base de datos al listar usuarios")
-        
+
     except Exception as e:
         logger.exception(f"Unexpected error listing users: {str(e)}")
         return HttpResponse.internal_server_error(error="An unexpected error occurred while retrieving users")

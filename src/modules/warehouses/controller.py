@@ -18,13 +18,16 @@ from src.utils.excel_formatter import ExcelImportError, create_template_excel
 from src.modules.warehouses.type import WarehouseCreate, WarehouseUpdate, WarehouseRead
 from src.utils.type_converters import decimal_to_float
 from src.utils.http_response import HttpResponse
+from src.modules.auth.dependencies import require_role
+from src.common.constants.roles import ADMIN
 import logging
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/warehouses",
-    tags=["warehouses"]
+    tags=["warehouses"],
+    dependencies=[Depends(require_role([ADMIN]))]
 )
 
 
@@ -50,12 +53,12 @@ def api_create_warehouse(
         db.rollback()
         logger.error(f"Integrity error creating warehouse: {str(ie)}")
         return HttpResponse.conflict(error="El almacén ya existe en la base de datos")
-    
+
     except SQLAlchemyError as se:
         db.rollback()
         logger.error(f"Database error creating warehouse: {str(se)}")
         return HttpResponse.internal_server_error(error="Error de base de datos al crear el almacén")
-    
+
     except Exception as e:
         db.rollback()
         logger.exception(f"Unexpected error creating warehouse: {str(e)}")
@@ -119,7 +122,7 @@ def api_search_warehouses(
     except SQLAlchemyError as se:
         logger.error(f"Database error searching warehouses with query '{q}': {str(se)}")
         return HttpResponse.internal_server_error(error="Error de base de datos al buscar almacenes")
-    
+
     except Exception as e:
         logger.exception(f"Unexpected error searching warehouses with query '{q}': {str(e)}")
         return HttpResponse.internal_server_error(error="Ocurrió un error inesperado al buscar almacenes")
@@ -147,20 +150,20 @@ async def api_import_warehouses(
     if not file.filename:
         logger.warning("File uploaded without filename")
         return HttpResponse.bad_request(error="El archivo no tiene nombre")
-    
+
     # Validar extensión del archivo
     if not file.filename.endswith(('.xlsx', '.xls')):
         logger.warning(f"Invalid file type uploaded: {file.filename}")
         return HttpResponse.bad_request(
             error="Tipo de archivo inválido. Por favor sube un archivo Excel (.xlsx o .xls)"
         )
-    
+
     try:
         created_warehouses, validation_errors, db_errors = import_warehouses_from_excel(
             file=file,
             db=db,
         )
-        
+
         if not validation_errors and not db_errors:
             logger.info(f"All {len(created_warehouses)} warehouses imported successfully")
             return HttpResponse.custom(
@@ -172,15 +175,15 @@ async def api_import_warehouses(
                             "nombre": warehouse.nombre,
                             "direccion": warehouse.direccion,
                             "telefono": warehouse.telefono,
-                            "latitud": decimal_to_float(warehouse.latitud),  
-                            "longitud": decimal_to_float(warehouse.longitud) 
+                            "latitud": decimal_to_float(warehouse.latitud),
+                            "longitud": decimal_to_float(warehouse.longitud)
                         }
                         for warehouse in created_warehouses
                     ]
                 },
                 status_code=201
             )
-        
+
         elif validation_errors and not db_errors:
             logger.warning(f"Import failed with {len(validation_errors)} validation errors")
             return HttpResponse.custom(
@@ -191,7 +194,7 @@ async def api_import_warehouses(
                 },
                 status_code=422
             )
-        
+
         else:
             logger.info(f"Partial import: {len(created_warehouses)} created, {len(db_errors)} failed")
             return HttpResponse.custom(
@@ -204,7 +207,7 @@ async def api_import_warehouses(
                             "nombre": warehouse.nombre,
                             "direccion": warehouse.direccion,
                             "telefono": warehouse.telefono,
-                            "latitud": decimal_to_float(warehouse.latitud),  
+                            "latitud": decimal_to_float(warehouse.latitud),
                             "longitud": decimal_to_float(warehouse.longitud)
                         }
                         for warehouse in created_warehouses
@@ -214,11 +217,11 @@ async def api_import_warehouses(
                 status_code=200
             )
 
-    
+
     except ExcelImportError as e:
         logger.error(f"Excel import error: {str(e)}")
         return HttpResponse.bad_request(error=str(e))
-    
+
     except Exception as e:
         logger.exception(f"Unexpected error during import: {str(e)}")
         return HttpResponse.internal_server_error(
@@ -230,7 +233,7 @@ async def api_import_warehouses(
     summary="Export all warehouses to Excel",
     response_description="Excel file with all warehouses"
 )
-def api_export_warehouses_excel(db: Session = Depends(get_db)):  
+def api_export_warehouses_excel(db: Session = Depends(get_db)):
     """
     Export all warehouses to an Excel file.
 
@@ -240,7 +243,7 @@ def api_export_warehouses_excel(db: Session = Depends(get_db)):
     """
     try:
         excel_content = export_warehouses_to_excel(db)
-        
+
         logger.info("Warehouses exported to Excel successfully")
         return Response(
             content=excel_content,
@@ -249,7 +252,7 @@ def api_export_warehouses_excel(db: Session = Depends(get_db)):
                 "Content-Disposition": "attachment; filename=almacenes.xlsx"
             }
         )
-    
+
     except Exception as e:
         logger.exception(f"Error exporting warehouses to Excel: {str(e)}")
         return HttpResponse.internal_server_error(
@@ -265,23 +268,23 @@ def api_export_warehouses_excel(db: Session = Depends(get_db)):
 def api_export_warehouses_pdf(db: Session = Depends(get_db)):
     """
     Export all warehouses to a PDF report.
-    
+
     **Returns:**
     - PDF file with formatted table
     - Columns: Nombre, Dirección, Teléfono, Latitud, Longitud
     """
     try:
         pdf_content = export_warehouses_to_pdf(db)
-        
+
         logger.info("Warehouses exported to PDF successfully")
         return Response(
             content=pdf_content,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": "attachment; filename=reporte_almacenes.pdf"  
+                "Content-Disposition": "attachment; filename=reporte_almacenes.pdf"
             }
         )
-    
+
     except Exception as e:
         logger.exception(f"Error exporting warehouses to PDF: {str(e)}")
         return HttpResponse.internal_server_error(
@@ -296,11 +299,11 @@ def api_export_warehouses_pdf(db: Session = Depends(get_db)):
 def api_download_warehouse_template():
     """
     Download an Excel template for bulk warehouse import.
-    
+
     **Returns:**
     - Excel template with required columns and example data
     - Use this template to prepare your bulk import file
-    
+
     **Columns:**
     - nombre: Warehouse name
     - direccion: Complete address
@@ -336,7 +339,7 @@ def api_download_warehouse_template():
             ],
             filename="template_almacenes.xlsx"
         )
-        
+
         logger.info("Warehouse template downloaded successfully")
         return Response(
             content=template.getvalue(),
@@ -345,7 +348,7 @@ def api_download_warehouse_template():
                 "Content-Disposition": "attachment; filename=template_almacenes.xlsx"
             }
         )
-    
+
     except Exception as e:
         logger.exception(f"Error creating warehouse template: {str(e)}")
         return HttpResponse.internal_server_error(
@@ -408,7 +411,7 @@ def api_update_warehouse(
         db.rollback()
         logger.error(f"Database error updating warehouse {warehouse_id}: {str(se)}")
         return HttpResponse.internal_server_error(error="Error de base de datos al actualizar el almacén")
-    
+
     except Exception as e:
         db.rollback()
         logger.exception(f"Unexpected error updating warehouse {warehouse_id}: {str(e)}")
@@ -468,7 +471,7 @@ def api_list_warehouses(
     except SQLAlchemyError as se:
         logger.error(f"Database error listing warehouses: {str(se)}")
         return HttpResponse.internal_server_error(error="Error de base de datos al listar almacenes")
-    
+
     except Exception as e:
         logger.exception(f"Unexpected error listing warehouses: {str(e)}")
         return HttpResponse.internal_server_error(error="Ocurrió un error inesperado al listar almacenes")

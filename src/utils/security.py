@@ -1,9 +1,10 @@
 from passlib.context import CryptContext
 import jwt
-from datetime import datetime,timedelta, timezone
-from typing import Optional, Dict,Any
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, Any
 import os
 from dotenv import load_dotenv
+from src.core.config import settings  # ✅ Importar settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -21,40 +22,38 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 # Configuracion de JWT
-
 load_dotenv()
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 if not SECRET_KEY:
     raise ValueError("JWT_SECRET_KEY no encontrada en .env")
 
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 480
 
-def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
+def create_access_token(data: Dict[str, Any], expires_delta: Optional[int] = None) -> str:
     """
     Crea un token JWT usando PyJWT.
 
     Args:
-        data: Datos a incluir en el token (user_id, rol, etc.)
-        expires_delta: Tiempo de expiración personalizado (opcional)
+        data: Datos a incluir en el token (userId, email, rol, etc.)
+        expires_delta: Tiempo de expiración en MINUTOS (opcional)
 
     Returns:
         Token JWT como string
 
     Example:
-        token = create_access_token({"user_id": 1, "rol": "vendedor"})
+        token = create_access_token({"userId": 1, "email": "user@mail.com", "rol": "admin"})
     """
     to_encode = data.copy()
 
-    # Agregar tiempo de expiracion
+    # ✅ Usar settings.JWT_EXPIRE_MINUTES en lugar de constante hardcodeada
     if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
+        expire = datetime.now(timezone.utc) + timedelta(minutes=expires_delta)
     else:
-        expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = datetime.now(timezone.utc) + timedelta(minutes=settings.JWT_EXPIRE_MINUTES)
 
     to_encode.update({"exp": expire})
 
-    #Crear el token pyJWT
+    # Crear el token con PyJWT
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
@@ -71,7 +70,7 @@ def verify_token(token: str) -> Optional[Dict[str, Any]]:
     Example:
         payload = verify_token(token)
         if payload:
-            user_id = payload["user_id"]
+            user_id = payload["userId"]
     """
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -84,7 +83,3 @@ def verify_token(token: str) -> Optional[Dict[str, Any]]:
         return None
     except Exception:
         return None
-
-
-
-

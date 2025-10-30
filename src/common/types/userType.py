@@ -1,7 +1,9 @@
+# src/common/types/userType.py
 import re
-from typing import Annotated
+from typing import Annotated, Optional
 from pydantic import BaseModel, EmailStr, ConfigDict, StringConstraints, field_validator
 from datetime import datetime
+from src.common.constants.roles import ADMIN, OPERATOR, SELLER
 
 DPIType = Annotated[str, StringConstraints(min_length=13, max_length=13)]
 
@@ -29,18 +31,19 @@ def validate_password(password: str) -> tuple[bool, str]:
     return True, ""
 
 
+# ============================================
+# SCHEMAS BASE (Compartidos por todos)
+# ============================================
 
 class UserBase(BaseModel):
+    """Schema base para todos los usuarios"""
     nombre: str
     dpi: DPIType
     email: EmailStr
 
 
-class UserCreate(UserBase):
-    password: str
-
-
 class UserUpdate(BaseModel):
+    """Schema para actualizar usuarios (cualquier rol)"""
     nombre: str | None = None
     dpi: DPIType | None = None
     email: EmailStr | None = None
@@ -48,6 +51,7 @@ class UserUpdate(BaseModel):
 
 
 class UserRead(BaseModel):
+    """Schema de lectura para todos los usuarios"""
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -59,7 +63,168 @@ class UserRead(BaseModel):
     creado_en: datetime | None = None
 
 
+# ============================================
+# SCHEMAS ESPECÍFICOS - STAFF
+# ============================================
+
+class StaffCreate(UserBase):
+    """
+    Schema para crear usuarios de staff (operador o vendedor).
+    El rol se especifica explícitamente.
+    """
+    password: str
+    rol: str  # 'operador' o 'vendedor'
+
+    @field_validator('rol')
+    @classmethod
+    def validate_rol(cls, v: str) -> str:
+        v = v.lower()
+        if v not in [OPERATOR.lower(), SELLER.lower()]:
+            raise ValueError(f"Rol debe ser '{OPERATOR}' o '{SELLER}'")
+        return v
+
+    @field_validator('password')
+    @classmethod
+    def validate_password_strength(cls, v: str) -> str:
+        is_valid, error_msg = validate_password(v)
+        if not is_valid:
+            raise ValueError(error_msg)
+        return v
+
+
+class BulkStaffImport(BaseModel):
+    """Schema para importación masiva de staff desde Excel"""
+    nombre: str
+    dpi: str
+    email: str
+    password: str
+    rol: str  # ✅ Incluye rol en el Excel
+
+    @field_validator('nombre', 'email', 'password', 'dpi', 'rol')
+    @classmethod
+    def not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError('El campo no puede estar vacío')
+        return v.strip()
+
+    @field_validator('dpi')
+    @classmethod
+    def validate_dpi_length(cls, v: str) -> str:
+        if len(v) != 13:
+            raise ValueError('El DPI debe tener exactamente 13 dígitos')
+        if not v.isdigit():
+            raise ValueError('El DPI solo debe contener números')
+        return v
+
+    @field_validator('email')
+    @classmethod
+    def validate_email_format(cls, v: str) -> str:
+        if '@' not in v or '.' not in v.split('@')[-1]:
+            raise ValueError('Formato de email inválido')
+        return v.lower()
+
+    @field_validator('password')
+    @classmethod
+    def validate_password_strength(cls, v: str) -> str:
+        is_valid, error_msg = validate_password(v)
+        if not is_valid:
+            raise ValueError(error_msg)
+        return v
+
+    @field_validator('rol')
+    @classmethod
+    def validate_rol(cls, v: str) -> str:
+        v = v.lower()
+        if v not in [OPERATOR.lower(), SELLER.lower()]:
+            raise ValueError(f"Rol debe ser '{OPERATOR}' o '{SELLER}'")
+        return v
+
+
+# ============================================
+# SCHEMAS ESPECÍFICOS - ADMIN
+# ============================================
+
+class AdminCreate(UserBase):
+    """
+    Schema para crear usuarios admin.
+    El rol se establece automáticamente en 'admin'.
+    """
+    password: str
+
+    @field_validator('password')
+    @classmethod
+    def validate_password_strength(cls, v: str) -> str:
+        is_valid, error_msg = validate_password(v)
+        if not is_valid:
+            raise ValueError(error_msg)
+        return v
+
+
+class BulkAdminImport(BaseModel):
+    """Schema para importación masiva de admins desde Excel"""
+    nombre: str
+    dpi: str
+    email: str
+    password: str
+    # ✅ NO incluye 'rol' porque siempre es 'admin'
+
+    @field_validator('nombre', 'email', 'password', 'dpi')
+    @classmethod
+    def not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError('El campo no puede estar vacío')
+        return v.strip()
+
+    @field_validator('dpi')
+    @classmethod
+    def validate_dpi_length(cls, v: str) -> str:
+        if len(v) != 13:
+            raise ValueError('El DPI debe tener exactamente 13 dígitos')
+        if not v.isdigit():
+            raise ValueError('El DPI solo debe contener números')
+        return v
+
+    @field_validator('email')
+    @classmethod
+    def validate_email_format(cls, v: str) -> str:
+        if '@' not in v or '.' not in v.split('@')[-1]:
+            raise ValueError('Formato de email inválido')
+        return v.lower()
+
+    @field_validator('password')
+    @classmethod
+    def validate_password_strength(cls, v: str) -> str:
+        is_valid, error_msg = validate_password(v)
+        if not is_valid:
+            raise ValueError(error_msg)
+        return v
+
+
+# ============================================
+# SCHEMAS DEPRECADOS (mantener por compatibilidad)
+# ============================================
+
+class UserCreate(UserBase):
+    """
+    ⚠️ DEPRECADO: Usar StaffCreate o AdminCreate en su lugar.
+    Se mantiene por compatibilidad con código existente.
+    """
+    password: str
+
+    @field_validator('password')
+    @classmethod
+    def validate_password_strength(cls, v: str) -> str:
+        is_valid, error_msg = validate_password(v)
+        if not is_valid:
+            raise ValueError(error_msg)
+        return v
+
+
 class BulkUserImport(BaseModel):
+    """
+    ⚠️ DEPRECADO: Usar BulkStaffImport en su lugar.
+    Se mantiene por compatibilidad.
+    """
     nombre: str
     dpi: str
     email: str

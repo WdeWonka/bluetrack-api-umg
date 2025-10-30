@@ -37,7 +37,7 @@ class HttpResponse:
         return HttpResponse.custom("No Content", None, 204)
 
     # ERROR RESPONSES
-        
+
     @staticmethod
     def bad_request(error: Any = None):
         return HttpResponse.custom("Bad Request", None, 400, error)

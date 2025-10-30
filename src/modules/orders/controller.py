@@ -21,8 +21,10 @@ from src.utils.date_parser import format_datetime_for_display
 from src.utils.excel_formatter import ExcelImportError
 from db.deps import get_db
 from src.utils.http_response import HttpResponse
+from src.modules.auth.dependencies import require_role
+from src.common.constants.roles import ADMIN, OPERATOR
 
-router = APIRouter(prefix="/orders", tags=["orders"])
+router = APIRouter(prefix="/orders", tags=["orders"], dependencies=[Depends(require_role([ADMIN, OPERATOR]))])
 logger = logging.getLogger(__name__)
 
 

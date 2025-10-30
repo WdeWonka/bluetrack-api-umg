@@ -44,20 +44,10 @@ def authenticate_user(db: Session, email: str, password: str) -> Optional[User]:
     return user
 
 
+
 def login(db: Session, email: str, password: str) -> dict:
     """
     Realiza el login completo: autentica y genera token.
-
-    Args:
-        db: Sesión de base de datos
-        email: Email del usuario
-        password: Contraseña
-
-    Returns:
-        Dict con access_token, token_type y datos del usuario
-
-    Raises:
-        ValueError: Si las credenciales son inválidas
     """
     # Autenticar usuario
     user = authenticate_user(db, email, password)
@@ -65,9 +55,9 @@ def login(db: Session, email: str, password: str) -> dict:
     if not user:
         raise ValueError("Email o contraseña incorrectos")
 
-    # Crear token con datos del usuario
+    # ✅ Crear token con nombres consistentes
     token_data = {
-        "user_id": user.id,
+        "userId": user.id,      # ✅ Cambiado de user_id a userId
         "email": user.email,
         "rol": user.rol
     }
@@ -82,6 +72,7 @@ def login(db: Session, email: str, password: str) -> dict:
             "nombre": user.nombre,
             "email": user.email,
             "rol": user.rol,
-            "dpi": user.dpi
+            "dpi": user.dpi,
+            "activo": user.activo  # ✅ Agregado
         }
     }

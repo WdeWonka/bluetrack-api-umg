@@ -1,81 +1,141 @@
-from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+"""
+Dependencias de autenticación.
+"""
+from fastapi import Depends, HTTPException, status, Request, Response
+import jwt
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
-from typing import Optional
-from src.utils.token_blacklist import is_blacklisted
-
 from db.session import get_db
 from src.models.user import User
-from src.utils.security import verify_token
+from src.core.config import settings
+from src.utils.security import create_access_token
+import logging
 
-# 🔐 Configuración de OAuth2
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+logger = logging.getLogger(__name__)
 
-
-async def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
-) -> User:
+def verify_token(token: str):
     """
-    Obtiene el usuario actual desde el token JWT.
+    Verifica y decodifica el JWT.
     """
-
-    if is_blacklisted(token):
+    try:
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM]
+        )
+        return payload
+    except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Sesión cerrada. Inicia sesión nuevamente",
+            detail="Token expirado",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="No se pudo validar las credenciales",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+async def get_current_user(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db)
+) -> User:
+    """
+    Dependency para obtener el usuario actual.
+    Lee el token desde la cookie y lo renueva si está próximo a expirar (sliding session).
+    """
+    # 1. Intentar obtener token de la cookie primero
+    token = request.cookies.get("auth_token")
 
-    # Verificar el token
-    payload = verify_token(token)
-    if payload is None:
-        raise credentials_exception
+    # 2. Si no hay cookie, intentar desde Authorization header (fallback)
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.replace("Bearer ", "")
 
-    # Extraer user_id del token
-    user_id: Optional[int] = payload.get("user_id")
-    if user_id is None:
-        raise credentials_exception
-
-    # Buscar usuario en la base de datos
-    user = db.query(User).filter(
-        User.id == user_id,
-        User.activo == True  # 👈 Filtrar directamente en la query
-    ).first()
-
-    if user is None:
+    if not token:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,  # 👈 401 en vez de 403
-            detail="Usuario no encontrado o inactivo"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No autenticado",
+            headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # 3. Verificar token
+    payload = verify_token(token)
+    user_id = payload.get("userId") or payload.get("sub")
+
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido"
+        )
+
+    # 4. Obtener usuario de la DB
+    user = db.query(User).filter(User.id == user_id).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Usuario no encontrado"
+        )
+
+    if not user.activo:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Usuario inactivo"
+        )
+
+    # 5. SLIDING SESSION: Renovar token si está próximo a expirar
+    exp_timestamp = payload.get("exp")
+
+    if exp_timestamp:
+        exp_datetime = datetime.fromtimestamp(exp_timestamp)
+        time_until_expiry = exp_datetime - datetime.utcnow()
+
+        # Si el token expira en menos de 30 minutos, renovarlo
+        if time_until_expiry < timedelta(minutes=30):
+            logger.info(f"🔄 Token renovado para {user.email} (quedaban {time_until_expiry})")
+
+            # Crear nuevo token con los mismos datos
+            new_token_data = {
+                "userId": user.id,
+                "email": user.email,
+                "rol": user.rol
+            }
+            new_token = create_access_token(new_token_data)
+
+            # Setear nueva cookie
+            response.set_cookie(
+                key="auth_token",
+                value=new_token,
+                httponly=True,
+                secure=False,
+                samesite="lax",
+                max_age=settings.JWT_EXPIRE_MINUTES * 60,
+                path="/",
+                domain=None
+            )
 
     return user
 
 
-def require_role(*allowed_roles: str):  # 👈 Mejor sintaxis con *args
+def require_role(*allowed_roles: str):
     """
-    Factory para requerir roles específicos.
+    Dependency para proteger rutas por rol.
 
     Uso:
-        @router.get("/admin", dependencies=[Depends(require_role("admin"))])
+    @router.get("/admin", dependencies=[Depends(require_role("admin"))])
     """
-    async def role_checker(current_user: User = Depends(get_current_user)) -> User:
+    async def role_checker(
+        current_user: User = Depends(get_current_user)
+    ):
         if current_user.rol not in allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Acceso denegado. Rol requerido: {' o '.join(allowed_roles)}"
+                detail=f"Acceso denegado. Se requiere rol: {', '.join(allowed_roles)}"
             )
         return current_user
+
     return role_checker
-
-
-# 🎯 Shortcuts para roles comunes
-require_admin = require_role("admin")
-require_operador = require_role("admin", "operador")
-require_vendedor = require_role("vendedor")
