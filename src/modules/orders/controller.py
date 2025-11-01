@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Query, UploadFile, File, Response
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from src.utils.product_helpers import get_product_display_name_from_order
 import logging
 from src.modules.orders.type import OrderCreate, OrderUpdate
 from src.modules.orders.service import (
@@ -13,18 +14,22 @@ from src.modules.orders.service import (
     search_products_for_order,
     search_orders_by_client_or_phone,
     get_orders_by_date,
-    import_orders_from_excel,
     export_orders_to_excel,
     export_orders_to_pdf
 )
 from src.utils.date_parser import format_datetime_for_display
-from src.utils.excel_formatter import ExcelImportError
 from db.deps import get_db
 from src.utils.http_response import HttpResponse
 from src.modules.auth.dependencies import require_role
 from src.common.constants.roles import ADMIN, OPERATOR
 
-router = APIRouter(prefix="/orders", tags=["orders"], dependencies=[Depends(require_role([ADMIN, OPERATOR]))])
+# ✅ CORRECCIÓN: Sin corchetes alrededor de ADMIN, OPERATOR
+router = APIRouter(
+    prefix="/orders",
+    tags=["orders"],
+    dependencies=[Depends(require_role(ADMIN, OPERATOR))]
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -47,7 +52,6 @@ def api_create_order(
 
     **Campos opcionales:**
     - fecha_solicitud: Fecha en formato DD/MM/YYYY, DD-MM-YYYY o YYYY-MM-DD (default: hoy)
-    - prioridad: 1-5 (default: 1)
 
     **La orden se crea con:**
     - asignada=False (sin ruta asignada)
@@ -95,17 +99,19 @@ def api_create_order(
         )
 
 
-
 @router.get(
     "/search/customers",
     summary="Buscar clientes para crear orden"
 )
 def api_search_customers_for_order(
-    q: str = Query(..., min_length=1),
+    q: str = Query("", min_length=0),  # 🆕 Cambiado: ahora es opcional con default=""
     limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db)
 ):
-    """Busca clientes por nombre o teléfono."""
+    """
+    Busca clientes por nombre o teléfono.
+    Si no se proporciona query, retorna los primeros clientes ordenados alfabéticamente.
+    """
     try:
         customers = search_customers_for_order(db, q, limit)
         return HttpResponse.success(
@@ -122,11 +128,14 @@ def api_search_customers_for_order(
     summary="Buscar productos para crear orden"
 )
 def api_search_products_for_order(
-    q: str = Query(..., min_length=1),
+    q: str = Query("", min_length=0),  # 🆕 Cambiado: ahora es opcional con default=""
     limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db)
 ):
-    """Busca productos por nombre."""
+    """
+    Busca productos por nombre.
+    Si no se proporciona query, retorna los primeros productos ordenados alfabéticamente.
+    """
     try:
         products = search_products_for_order(db, q, limit)
         return HttpResponse.success(
@@ -136,8 +145,6 @@ def api_search_products_for_order(
     except Exception as e:
         logger.exception(f"Error searching products: {str(e)}")
         return HttpResponse.internal_server_error(error="Error al buscar productos")
-
-
 @router.get(
     "/search",
     summary="Buscar órdenes por cliente"
@@ -160,7 +167,7 @@ def api_search_orders(
                         "id": o.id,
                         "cliente_id": o.cliente_id,
                         "cliente_nombre": o.cliente.nombre,
-                        "producto_nombre": o.producto.nombre,
+                        "producto_nombre": get_product_display_name_from_order(o),
                         "cantidad": o.cantidad,
                         "prioridad": o.prioridad,
                         "asignada": o.asignada,
@@ -200,7 +207,6 @@ def api_get_orders_by_date(
 
     **Ejemplo:** GET /orders/date/10-11-2025
     """
-    # Validar que no contenga slashes
     if '/' in fecha:
         logger.warning(f"Date format with slashes rejected: {fecha}")
         return HttpResponse.bad_request(
@@ -211,7 +217,6 @@ def api_get_orders_by_date(
         orders = get_orders_by_date(db, fecha)
         total_ordenes = len(orders)
 
-        # Estadísticas por prioridad
         por_prioridad = {}
         for orden in orders:
             prioridad = orden.prioridad or "normal"
@@ -233,7 +238,7 @@ def api_get_orders_by_date(
                         "cliente_telefono": o.cliente.telefono or "",
                         "cliente_direccion": o.cliente.direccion,
                         "producto_id": o.producto_id,
-                        "producto_nombre": o.producto.nombre,
+                        "producto_nombre": get_product_display_name_from_order(o),
                         "cantidad": o.cantidad,
                         "prioridad": o.prioridad or "normal",
                         "fecha_solicitud": format_datetime_for_display(o.fecha_solicitud)
@@ -251,6 +256,7 @@ def api_get_orders_by_date(
     except Exception as e:
         logger.exception(f"Error getting orders for date {fecha}")
         return HttpResponse.internal_server_error(error="Error al obtener órdenes")
+
 
 @router.get(
     "/export/excel",
@@ -290,50 +296,7 @@ def api_export_orders_pdf(db: Session = Depends(get_db)):
         return HttpResponse.internal_server_error(error="Error al exportar a PDF")
 
 
-@router.post(
-    "/import",
-    summary="Importar órdenes desde Excel"
-)
-async def api_import_orders(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db)
-):
-    """Importa órdenes desde Excel."""
-    if not file.filename or not file.filename.endswith(('.xlsx', '.xls')):
-        return HttpResponse.bad_request(error="Archivo inválido. Use .xlsx o .xls")
-
-    try:
-        created_orders, validation_errors, db_errors = import_orders_from_excel(file.file, db)
-
-        if not validation_errors and not db_errors:
-            return HttpResponse.custom(
-                message=f"Se crearon {len(created_orders)} órdenes exitosamente",
-                response={"created_count": len(created_orders)},
-                status_code=201
-            )
-        elif validation_errors:
-            return HttpResponse.custom(
-                message="Errores de validación",
-                response={"validation_errors": validation_errors},
-                status_code=422
-            )
-        else:
-            return HttpResponse.custom(
-                message=f"Creadas: {len(created_orders)}, Errores: {len(db_errors)}",
-                response={"created_count": len(created_orders), "db_errors": db_errors},
-                status_code=200
-            )
-    except ExcelImportError as e:
-        return HttpResponse.bad_request(error=str(e))
-    except Exception as e:
-        logger.exception("Error importing orders")
-        return HttpResponse.internal_server_error(error="Error al importar")
-
-
-@router.get(
-    "/",
-    summary="Listar todas las órdenes"
-)
+@router.get("/", summary="Listar todas las órdenes")
 def api_list_orders(
     db: Session = Depends(get_db),
     page: int = Query(1, ge=1),
@@ -347,7 +310,17 @@ def api_list_orders(
         if not orders:
             return HttpResponse.success(
                 message="No se encontraron órdenes",
-                response={"orders": [], "pagination": {"page": page, "total_items": 0}}
+                response={
+                    "orders": [],
+                    "pagination": {
+                        "page": page,
+                        "per_page": per_page,
+                        "total_items": 0,
+                        "total_pages": 0,
+                        "has_next": False,
+                        "has_prev": False
+                    }
+                }
             )
 
         total_orders = count_orders(db)
@@ -361,7 +334,11 @@ def api_list_orders(
                         "id": order.id,
                         "cliente_id": order.cliente_id,
                         "cliente_nombre": order.cliente.nombre if order.cliente else None,
-                        "producto_nombre": order.producto.nombre if order.producto else None,
+                        # ✅ USAR SNAPSHOT: Prioridad al snapshot, fallback a relación
+                        "producto_nombre": (
+                            order.producto_nombre_snapshot
+                            or (order.producto.nombre if order.producto else "Producto no disponible")
+                        ),
                         "cantidad": order.cantidad,
                         "prioridad": order.prioridad,
                         "asignada": order.asignada,
@@ -384,7 +361,6 @@ def api_list_orders(
         return HttpResponse.internal_server_error(error="Error al listar órdenes")
 
 
-# IMPORTANTE: Este endpoint DEBE ir DESPUÉS de todas las rutas específicas
 @router.get(
     "/{order_id}",
     summary="Obtener orden por ID"
@@ -405,7 +381,7 @@ def api_get_order(
                 "id": order.id,
                 "cliente_id": order.cliente_id,
                 "cliente_nombre": order.cliente.nombre if order.cliente else None,
-                "producto_nombre": order.producto.nombre if order.producto else None,
+                "producto_nombre": get_product_display_name_from_order(order),
                 "cantidad": order.cantidad,
                 "prioridad": order.prioridad,
                 "asignada": order.asignada,
@@ -459,37 +435,3 @@ def api_update_order(
         db.rollback()
         logger.exception(f"Error updating order {order_id}")
         return HttpResponse.internal_server_error(error="Error al actualizar")
-
-
-@router.delete(
-    "/{order_id}",
-    summary="Eliminar orden"
-)
-def api_delete_order(
-    order_id: int,
-    db: Session = Depends(get_db)
-):
-    """Elimina una orden."""
-    from src.models.orders import Order
-
-    try:
-        order = db.query(Order).filter(Order.id == order_id).first()
-        if not order:
-            return HttpResponse.not_found(error=f"Orden con ID {order_id} no existe")
-
-        if order.asignada:
-            return HttpResponse.bad_request(
-                error="No se puede eliminar una orden asignada"
-            )
-
-        db.delete(order)
-        db.commit()
-
-        return HttpResponse.success(
-            message=f"Orden {order_id} eliminada exitosamente",
-            response={"deleted_order_id": order_id}
-        )
-    except Exception as e:
-        db.rollback()
-        logger.exception(f"Error deleting order {order_id}")
-        return HttpResponse.internal_server_error(error="Error al eliminar")

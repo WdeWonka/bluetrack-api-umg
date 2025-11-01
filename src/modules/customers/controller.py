@@ -19,24 +19,27 @@ from src.modules.customers.type import CustomerCreate, CustomerUpdate, CustomerR
 from src.utils.type_converters import decimal_to_float
 from src.utils.http_response import HttpResponse
 from src.modules.auth.dependencies import require_role
-from src.common.constants.roles import ADMIN
+from src.common.constants.roles import ADMIN, OPERATOR, SELLER
 import logging
 
 logger = logging.getLogger(__name__)
 
+# ✅ Router SIN dependencias globales
 router = APIRouter(
     prefix="/customers",
-    tags=["customers"],
-    dependencies=[Depends(require_role(ADMIN))]
+    tags=["customers"]
 )
 
 
-
+# ==========================================
+# ENDPOINTS SOLO PARA ADMIN
+# ==========================================
 
 @router.post(
     "/",
     summary="Create a new customer",
-    response_description="Customer created successfully"
+    response_description="Customer created successfully",
+    dependencies=[Depends(require_role(ADMIN))]
 )
 def api_create_customer(
     customer_data: CustomerCreate,
@@ -65,72 +68,49 @@ def api_create_customer(
         return HttpResponse.internal_server_error(error="Ocurrió un error inesperado al crear el cliente")
 
 
-
-@router.get(
-    "/search",
-    summary="Search customers by name or address",
-    response_description="Search results retrieved successfully"
+@router.patch(
+    "/{customer_id}",
+    summary="Update customer information",
+    response_description="Customer updated successfully",
+    dependencies=[Depends(require_role(ADMIN))]  # ✅ Solo Admin
 )
-def api_search_customers(
-    db: Session = Depends(get_db),
-    q: str = Query(..., min_length=1, description="Search query (name or address)"),
-    page: int = Query(1, ge=1, description="Page number (starts at 1)"),
-    per_page: int = Query(10, ge=1, le=50, description="Items per page (max 50)")
+def api_update_customer(
+    customer_id: int,
+    customer_data: CustomerUpdate,
+    db: Session = Depends(get_db)
 ):
     try:
-        skip = (page - 1) * per_page
-        results = search_customers(db, query=q, skip=skip, limit=per_page)
+        customer = update_customer(db, customer_id, customer_data)
+        if not customer:
+            logger.warning(f"Customer not found for update with ID: {customer_id}")
+            return HttpResponse.not_found(error=f"Customer with ID {customer_id} does not exist")
 
-        if not results:
-            logger.info(f"No customers found for search query: {q} (page {page})")
-            return HttpResponse.success(
-                message=f"No customers found matching '{q}'",
-                response={
-                    "customers": [],
-                    "search_query": q,
-                    "pagination": {
-                        "page": page,
-                        "per_page": per_page,
-                        "total_items": 0,
-                        "total_pages": 0,
-                        "has_next": False,
-                        "has_prev": False
-                    }
-                }
-            )
-
-        total_results = count_search_results(db, query=q)
-        total_pages = (total_results + per_page - 1) // per_page
-
-        logger.info(f"Found {len(results)} customers for search query: {q}")
-        return HttpResponse.success(
-            message=f"Found {total_results} customers matching '{q}'",
-            response={
-                "customers": [CustomerRead.model_validate(c).model_dump(mode='json') for c in results],
-                "search_query": q,
-                "pagination": {
-                    "page": page,
-                    "per_page": per_page,
-                    "total_items": total_results,
-                    "total_pages": total_pages,
-                    "has_next": page < total_pages,
-                    "has_prev": page > 1
-                }
-            }
+        logger.info(f"Customer updated successfully with ID: {customer_id}")
+        return HttpResponse.updated(
+            response=CustomerRead.model_validate(customer).model_dump(mode='json')
         )
 
+    except IntegrityError as ie:
+        db.rollback()
+        logger.error(f"Integrity error updating customer {customer_id}: {str(ie)}")
+        return HttpResponse.conflict(error="Datos duplicados en la base de datos")
+
     except SQLAlchemyError as se:
-        logger.error(f"Database error searching customers with query '{q}': {str(se)}")
-        return HttpResponse.internal_server_error(error="Error de base de datos al buscar clientes")
+        db.rollback()
+        logger.error(f"Database error updating customer {customer_id}: {str(se)}")
+        return HttpResponse.internal_server_error(error="Error de base de datos al actualizar el cliente")
 
     except Exception as e:
-        logger.exception(f"Unexpected error searching customers with query '{q}': {str(e)}")
-        return HttpResponse.internal_server_error(error="Ocurrió un error inesperado al buscar clientes")
+        db.rollback()
+        logger.exception(f"Unexpected error updating customer {customer_id}: {str(e)}")
+        return HttpResponse.internal_server_error(error="Ocurrió un error inesperado al actualizar el cliente")
+
 
 @router.post(
     "/import",
     summary="Import customers from Excel file",
-    response_description="Customers imported successfully"
+    response_description="Customers imported successfully",
+    dependencies=[Depends(require_role(ADMIN))]
 )
 async def api_import_customers(
     file: UploadFile = File(..., description="Excel file (.xlsx) with customer data"),
@@ -145,13 +125,18 @@ async def api_import_customers(
     - telefono: Phone number
     - latitud: Latitude
     - longitud: Longitude
+
+    **Status Codes:**
+    - 201: All customers imported successfully
+    - 207: Partial import (some created, some failed)
+    - 409: No customers imported (all duplicates)
+    - 422: Validation errors in Excel format
+    - 400: Invalid file or other errors
     """
-    # Validar que el archivo tenga nombre
     if not file.filename:
         logger.warning("File uploaded without filename")
         return HttpResponse.bad_request(error="El archivo no tiene nombre")
 
-    # Validar extensión del archivo
     if not file.filename.endswith(('.xlsx', '.xls')):
         logger.warning(f"Invalid file type uploaded: {file.filename}")
         return HttpResponse.bad_request(
@@ -164,41 +149,39 @@ async def api_import_customers(
             db=db,
         )
 
-        if not validation_errors and not db_errors:
-            logger.info(f"All {len(created_customers)} customers imported successfully")
-            return HttpResponse.custom(
-                message=f"Se crearon {len(created_customers)} clientes exitosamente",
-                response={
-                    "created_count": len(created_customers),
-                    "customers": [
-                        {
-                            "nombre": customer.nombre,
-                            "direccion": customer.direccion,
-                            "telefono": customer.telefono,
-                            "latitud": decimal_to_float(customer.latitud),
-                            "longitud": decimal_to_float(customer.longitud)
-                        }
-                        for customer in created_customers
-                    ]
-                },
-                status_code=201
-            )
-
-        elif validation_errors and not db_errors:
+        # CASO 1: ❌ Errores de validación
+        if validation_errors:
             logger.warning(f"Import failed with {len(validation_errors)} validation errors")
             return HttpResponse.custom(
                 message="El archivo contiene errores de validación. No se creó ningún cliente.",
                 response={
+                    "created_count": 0,
+                    "error_count": len(validation_errors),
                     "validation_errors": validation_errors,
-                    "total_errors": len(validation_errors)
+                    "db_errors": []
                 },
                 status_code=422
             )
 
-        else:
+        # CASO 2: 🔴 NO se creó NINGÚN cliente (todos duplicados)
+        if len(created_customers) == 0 and len(db_errors) > 0:
+            logger.warning(f"Import failed: all {len(db_errors)} customers are duplicates")
+            return HttpResponse.custom(
+                message="Todos los clientes ya existen en el sistema",
+                response={
+                    "created_count": 0,
+                    "error_count": len(db_errors),
+                    "validation_errors": [],
+                    "db_errors": db_errors
+                },
+                status_code=409
+            )
+
+        # CASO 3: 🟡 Importación PARCIAL
+        if len(created_customers) > 0 and len(db_errors) > 0:
             logger.info(f"Partial import: {len(created_customers)} created, {len(db_errors)} failed")
             return HttpResponse.custom(
-                message=f"Se crearon {len(created_customers)} clientes. {len(db_errors)} clientes no se pudieron crear.",
+                message=f"Se importaron {len(created_customers)} de {len(created_customers) + len(db_errors)} clientes",
                 response={
                     "created_count": len(created_customers),
                     "error_count": len(db_errors),
@@ -212,11 +195,34 @@ async def api_import_customers(
                         }
                         for customer in created_customers
                     ],
+                    "validation_errors": [],
                     "db_errors": db_errors
                 },
-                status_code=200
+                status_code=207
             )
 
+        # CASO 4: ✅ TODOS los clientes se crearon exitosamente
+        logger.info(f"All {len(created_customers)} customers imported successfully")
+        return HttpResponse.custom(
+            message="Todos los clientes importados correctamente",
+            response={
+                "created_count": len(created_customers),
+                "error_count": 0,
+                "created_customers": [
+                    {
+                        "nombre": customer.nombre,
+                        "direccion": customer.direccion,
+                        "telefono": customer.telefono,
+                        "latitud": decimal_to_float(customer.latitud),
+                        "longitud": decimal_to_float(customer.longitud)
+                    }
+                    for customer in created_customers
+                ],
+                "validation_errors": [],
+                "db_errors": []
+            },
+            status_code=201
+        )
 
     except ExcelImportError as e:
         logger.error(f"Excel import error: {str(e)}")
@@ -231,7 +237,8 @@ async def api_import_customers(
 @router.get(
     "/export/excel",
     summary="Export all customers to Excel",
-    response_description="Excel file with all customers"
+    response_description="Excel file with all customers",
+    dependencies=[Depends(require_role(ADMIN))]  # ✅ Solo Admin
 )
 def api_export_customers_excel(db: Session = Depends(get_db)):
     """
@@ -263,7 +270,8 @@ def api_export_customers_excel(db: Session = Depends(get_db)):
 @router.get(
     "/export/pdf",
     summary="Export all customers to PDF",
-    response_description="PDF file with all customers"
+    response_description="PDF file with all customers",
+    dependencies=[Depends(require_role(ADMIN))]  # ✅ Solo Admin
 )
 def api_export_customers_pdf(db: Session = Depends(get_db)):
     """
@@ -291,10 +299,12 @@ def api_export_customers_pdf(db: Session = Depends(get_db)):
             error="Ocurrió un error al exportar los clientes a PDF"
         )
 
+
 @router.get(
     "/template",
     summary="Download Excel template for bulk customer import",
-    response_description="Excel template file"
+    response_description="Excel template file",
+    dependencies=[Depends(require_role(ADMIN))]  # ✅ Solo Admin
 )
 def api_download_customer_template():
     """
@@ -355,73 +365,16 @@ def api_download_customer_template():
             error="Ocurrió un error al generar el template de clientes"
         )
 
-@router.get(
-    "/{customer_id}",
-    summary="Get customer by ID",
-    response_description="Customer details retrieved successfully"
-)
-def api_get_customer(
-    customer_id: int,
-    db: Session = Depends(get_db)
-):
-    try:
-        customer = get_customer(db, customer_id)
-        if not customer:
-            logger.warning(f"Customer not found with ID: {customer_id}")
-            return HttpResponse.not_found(error=f"Customer with ID {customer_id} does not exist")
 
-        logger.info(f"Customer retrieved successfully with ID: {customer_id}")
-        return HttpResponse.success(
-            message="Customer retrieved successfully",
-            response=CustomerRead.model_validate(customer).model_dump(mode='json')
-        )
-
-    except Exception as e:
-        logger.exception(f"Unexpected error retrieving customer {customer_id}: {str(e)}")
-        return HttpResponse.internal_server_error(error="Ocurrió un error inesperado al obtener el cliente")
-
-
-@router.put(
-    "/{customer_id}",
-    summary="Update customer information",
-    response_description="Customer updated successfully"
-)
-def api_update_customer(
-    customer_id: int,
-    customer_data: CustomerUpdate,
-    db: Session = Depends(get_db)
-):
-    try:
-        customer = update_customer(db, customer_id, customer_data)
-        if not customer:
-            logger.warning(f"Customer not found for update with ID: {customer_id}")
-            return HttpResponse.not_found(error=f"Customer with ID {customer_id} does not exist")
-
-        logger.info(f"Customer updated successfully with ID: {customer_id}")
-        return HttpResponse.updated(
-            response=CustomerRead.model_validate(customer).model_dump(mode='json')
-        )
-
-    except IntegrityError as ie:
-        db.rollback()
-        logger.error(f"Integrity error updating customer {customer_id}: {str(ie)}")
-        return HttpResponse.conflict(error="Datos duplicados en la base de datos")
-
-    except SQLAlchemyError as se:
-        db.rollback()
-        logger.error(f"Database error updating customer {customer_id}: {str(se)}")
-        return HttpResponse.internal_server_error(error="Error de base de datos al actualizar el cliente")
-
-    except Exception as e:
-        db.rollback()
-        logger.exception(f"Unexpected error updating customer {customer_id}: {str(e)}")
-        return HttpResponse.internal_server_error(error="Ocurrió un error inesperado al actualizar el cliente")
-
+# ==========================================
+# ENDPOINTS ACCESIBLES PARA ADMIN, OPERATOR Y SELLER
+# ==========================================
 
 @router.get(
     "/",
     summary="List all customers with pagination",
-    response_description="Paginated list of customers retrieved successfully"
+    response_description="Paginated list of customers retrieved successfully",
+    dependencies=[Depends(require_role(ADMIN, OPERATOR, SELLER))]
 )
 def api_list_customers(
     db: Session = Depends(get_db),
@@ -475,3 +428,93 @@ def api_list_customers(
     except Exception as e:
         logger.exception(f"Unexpected error listing customers: {str(e)}")
         return HttpResponse.internal_server_error(error="Ocurrió un error inesperado al listar clientes")
+
+
+@router.get(
+    "/search",
+    summary="Search customers by name or address",
+    response_description="Search results retrieved successfully",
+    dependencies=[Depends(require_role(ADMIN, OPERATOR, SELLER))]
+)
+def api_search_customers(
+    db: Session = Depends(get_db),
+    q: str = Query(..., min_length=1, description="Search query (name or address)"),
+    page: int = Query(1, ge=1, description="Page number (starts at 1)"),
+    per_page: int = Query(10, ge=1, le=50, description="Items per page (max 50)")
+):
+    try:
+        skip = (page - 1) * per_page
+        results = search_customers(db, query=q, skip=skip, limit=per_page)
+
+        if not results:
+            logger.info(f"No customers found for search query: {q} (page {page})")
+            return HttpResponse.success(
+                message=f"No customers found matching '{q}'",
+                response={
+                    "customers": [],
+                    "search_query": q,
+                    "pagination": {
+                        "page": page,
+                        "per_page": per_page,
+                        "total_items": 0,
+                        "total_pages": 0,
+                        "has_next": False,
+                        "has_prev": False
+                    }
+                }
+            )
+
+        total_results = count_search_results(db, query=q)
+        total_pages = (total_results + per_page - 1) // per_page
+
+        logger.info(f"Found {len(results)} customers for search query: {q}")
+        return HttpResponse.success(
+            message=f"Found {total_results} customers matching '{q}'",
+            response={
+                "customers": [CustomerRead.model_validate(c).model_dump(mode='json') for c in results],
+                "search_query": q,
+                "pagination": {
+                    "page": page,
+                    "per_page": per_page,
+                    "total_items": total_results,
+                    "total_pages": total_pages,
+                    "has_next": page < total_pages,
+                    "has_prev": page > 1
+                }
+            }
+        )
+
+    except SQLAlchemyError as se:
+        logger.error(f"Database error searching customers with query '{q}': {str(se)}")
+        return HttpResponse.internal_server_error(error="Error de base de datos al buscar clientes")
+
+    except Exception as e:
+        logger.exception(f"Unexpected error searching customers with query '{q}': {str(e)}")
+        return HttpResponse.internal_server_error(error="Ocurrió un error inesperado al buscar clientes")
+
+
+@router.get(
+    "/{customer_id}",
+    summary="Get customer by ID",
+    response_description="Customer details retrieved successfully",
+    dependencies=[Depends(require_role(ADMIN, OPERATOR, SELLER))]
+)
+def api_get_customer(
+    customer_id: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        customer = get_customer(db, customer_id)
+        if not customer:
+            logger.warning(f"Customer not found with ID: {customer_id}")
+            return HttpResponse.not_found(error=f"Customer with ID {customer_id} does not exist")
+
+        logger.info(f"Customer retrieved successfully with ID: {customer_id}")
+        return HttpResponse.success(
+            message="Customer retrieved successfully",
+            response=CustomerRead.model_validate(customer).model_dump(mode='json')
+        )
+
+    except Exception as e:
+        logger.exception(f"Unexpected error retrieving customer {customer_id}: {str(e)}")
+        return HttpResponse.internal_server_error(error="Ocurrió un error inesperado al obtener el cliente")

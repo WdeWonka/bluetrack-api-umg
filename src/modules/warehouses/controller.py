@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/warehouses",
     tags=["warehouses"],
-    dependencies=[Depends(require_role([ADMIN]))]
+    dependencies=[Depends(require_role(ADMIN))]
 )
 
 
@@ -145,13 +145,18 @@ async def api_import_warehouses(
     - telefono: Phone number
     - latitud: Latitude
     - longitud: Longitude
+
+    **Status Codes:**
+    - 201: All warehouses imported successfully
+    - 207: Partial import (some created, some failed)
+    - 409: No warehouses imported (all duplicates)
+    - 422: Validation errors in Excel format
+    - 400: Invalid file or other errors
     """
-    # Validar que el archivo tenga nombre
     if not file.filename:
         logger.warning("File uploaded without filename")
         return HttpResponse.bad_request(error="El archivo no tiene nombre")
 
-    # Validar extensión del archivo
     if not file.filename.endswith(('.xlsx', '.xls')):
         logger.warning(f"Invalid file type uploaded: {file.filename}")
         return HttpResponse.bad_request(
@@ -164,41 +169,39 @@ async def api_import_warehouses(
             db=db,
         )
 
-        if not validation_errors and not db_errors:
-            logger.info(f"All {len(created_warehouses)} warehouses imported successfully")
-            return HttpResponse.custom(
-                message=f"Se crearon {len(created_warehouses)} almacenes exitosamente",
-                response={
-                    "created_count": len(created_warehouses),
-                    "warehouses": [
-                        {
-                            "nombre": warehouse.nombre,
-                            "direccion": warehouse.direccion,
-                            "telefono": warehouse.telefono,
-                            "latitud": decimal_to_float(warehouse.latitud),
-                            "longitud": decimal_to_float(warehouse.longitud)
-                        }
-                        for warehouse in created_warehouses
-                    ]
-                },
-                status_code=201
-            )
-
-        elif validation_errors and not db_errors:
+        # CASO 1: ❌ Errores de validación
+        if validation_errors:
             logger.warning(f"Import failed with {len(validation_errors)} validation errors")
             return HttpResponse.custom(
                 message="El archivo contiene errores de validación. No se creó ningún almacén.",
                 response={
+                    "created_count": 0,
+                    "error_count": len(validation_errors),
                     "validation_errors": validation_errors,
-                    "total_errors": len(validation_errors)
+                    "db_errors": []
                 },
                 status_code=422
             )
 
-        else:
+        # CASO 2: 🔴 NO se creó NINGÚN almacén (todos duplicados)
+        if len(created_warehouses) == 0 and len(db_errors) > 0:
+            logger.warning(f"Import failed: all {len(db_errors)} warehouses are duplicates")
+            return HttpResponse.custom(
+                message="Todos los almacenes ya existen en el sistema",
+                response={
+                    "created_count": 0,
+                    "error_count": len(db_errors),
+                    "validation_errors": [],
+                    "db_errors": db_errors
+                },
+                status_code=409
+            )
+
+        # CASO 3: 🟡 Importación PARCIAL
+        if len(created_warehouses) > 0 and len(db_errors) > 0:
             logger.info(f"Partial import: {len(created_warehouses)} created, {len(db_errors)} failed")
             return HttpResponse.custom(
-                message=f"Se crearon {len(created_warehouses)} almacenes. {len(db_errors)} almacenes no se pudieron crear.",
+                message=f"Se importaron {len(created_warehouses)} de {len(created_warehouses) + len(db_errors)} almacenes",
                 response={
                     "created_count": len(created_warehouses),
                     "error_count": len(db_errors),
@@ -212,11 +215,34 @@ async def api_import_warehouses(
                         }
                         for warehouse in created_warehouses
                     ],
+                    "validation_errors": [],
                     "db_errors": db_errors
                 },
-                status_code=200
+                status_code=207
             )
 
+        # CASO 4: ✅ TODOS los almacenes se crearon exitosamente
+        logger.info(f"All {len(created_warehouses)} warehouses imported successfully")
+        return HttpResponse.custom(
+            message="Todos los almacenes importados correctamente",
+            response={
+                "created_count": len(created_warehouses),
+                "error_count": 0,
+                "created_warehouses": [
+                    {
+                        "nombre": warehouse.nombre,
+                        "direccion": warehouse.direccion,
+                        "telefono": warehouse.telefono,
+                        "latitud": decimal_to_float(warehouse.latitud),
+                        "longitud": decimal_to_float(warehouse.longitud)
+                    }
+                    for warehouse in created_warehouses
+                ],
+                "validation_errors": [],
+                "db_errors": []
+            },
+            status_code=201
+        )
 
     except ExcelImportError as e:
         logger.error(f"Excel import error: {str(e)}")
@@ -227,7 +253,6 @@ async def api_import_warehouses(
         return HttpResponse.internal_server_error(
             error="Ocurrió un error inesperado al procesar el archivo"
         )
-
 @router.get(
     "/export/excel",
     summary="Export all warehouses to Excel",
@@ -381,7 +406,7 @@ def api_get_warehouse(
         return HttpResponse.internal_server_error(error="Ocurrió un error inesperado al obtener el almacén")
 
 
-@router.put(
+@router.patch(
     "/{warehouse_id}",
     summary="Update warehouse information",
     response_description="Warehouse updated successfully"

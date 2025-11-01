@@ -24,7 +24,7 @@ from src.modules.auth.jwt_routes import router as auth_router
 # =========================================
 
 app = FastAPI(
-    title="DeliverIt API",
+    title="Bluetrack API",
     version="1.0.0",
     description="API REST para gestión de entregas, rutas y logística",
     docs_url="/docs",

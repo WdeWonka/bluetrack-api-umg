@@ -14,6 +14,8 @@ from src.models.route_inventory import RouteInventory
 from src.models.orders import Order
 from src.models.customer import Customer
 from src.modules.routes.type import RouteCreate, EstadoRuta
+from src.utils.product_helpers import get_product_display_name_from_order
+
 from src.modules.routes.inventory_service import (
     reserve_stock_for_route,
     return_remaining_stock_to_warehouse,
@@ -315,7 +317,7 @@ def get_route_with_current_cliente(db: Session, route_id: int) -> dict:
         productos_detalle.append({
             "orden_id": orden.id,
             "producto_id": orden.producto_id,
-            "producto_nombre": orden.producto.nombre,
+            "producto_nombre": get_product_display_name_from_order(orden),
             "cantidad": orden.cantidad,
             "precio_unitario": float(orden.producto.precio),
             "subtotal": float(orden.cantidad * orden.producto.precio),

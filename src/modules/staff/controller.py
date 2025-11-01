@@ -19,7 +19,8 @@ from src.modules.staff.service import (
     get_all_sellers,
     import_users_from_excel,
     export_users_to_excel,
-    export_users_to_pdf
+    export_users_to_pdf,
+    soft_delete_user
 )
 
 from src.utils.excel_formatter import ExcelImportError, create_template_excel
@@ -423,6 +424,13 @@ async def api_import_staff(
     - rol: User role ('operador' or 'vendedor')
 
     **Download template**: GET /staff/users/template
+
+    **Status Codes:**
+    - 201: All users imported successfully
+    - 207: Partial import (some created, some failed)
+    - 409: No users imported (all duplicates)
+    - 422: Validation errors in Excel format
+    - 400: Invalid file or other errors
     """
     if not file.filename:
         logger.warning("File uploaded without filename")
@@ -440,40 +448,39 @@ async def api_import_staff(
             db=db
         )
 
-        if not validation_errors and not db_errors:
-            logger.info(f"All {len(created_users)} staff users imported successfully")
-            return HttpResponse.custom(
-                message=f"Se crearon {len(created_users)} usuarios exitosamente",
-                response={
-                    "created_count": len(created_users),
-                    "users": [
-                        {
-                            "nombre": user.nombre,
-                            "email": user.email,
-                            "dpi": user.dpi,
-                            "rol": user.rol
-                        }
-                        for user in created_users
-                    ]
-                },
-                status_code=201
-            )
-
-        elif validation_errors and not db_errors:
+        # CASO 1: ❌ Errores de validación
+        if validation_errors:
             logger.warning(f"Import failed with {len(validation_errors)} validation errors")
             return HttpResponse.custom(
                 message="El archivo contiene errores de validación. No se creó ningún usuario.",
                 response={
+                    "created_count": 0,
+                    "error_count": len(validation_errors),
                     "validation_errors": validation_errors,
-                    "total_errors": len(validation_errors)
+                    "db_errors": []
                 },
                 status_code=422
             )
 
-        else:
+        # CASO 2: 🔴 NO se creó NINGÚN usuario (todos duplicados)
+        if len(created_users) == 0 and len(db_errors) > 0:
+            logger.warning(f"Import failed: all {len(db_errors)} users are duplicates")
+            return HttpResponse.custom(
+                message="Todos los usuarios ya existen en el sistema",
+                response={
+                    "created_count": 0,
+                    "error_count": len(db_errors),
+                    "validation_errors": [],
+                    "db_errors": db_errors
+                },
+                status_code=409
+            )
+
+        # CASO 3: 🟡 Importación PARCIAL
+        if len(created_users) > 0 and len(db_errors) > 0:
             logger.info(f"Partial import: {len(created_users)} created, {len(db_errors)} failed")
             return HttpResponse.custom(
-                message=f"Se crearon {len(created_users)} usuarios. {len(db_errors)} usuarios no se pudieron crear.",
+                message=f"Se importaron {len(created_users)} de {len(created_users) + len(db_errors)} usuarios",
                 response={
                     "created_count": len(created_users),
                     "error_count": len(db_errors),
@@ -486,10 +493,33 @@ async def api_import_staff(
                         }
                         for user in created_users
                     ],
+                    "validation_errors": [],
                     "db_errors": db_errors
                 },
-                status_code=200
+                status_code=207
             )
+
+        # CASO 4: ✅ TODOS los usuarios se crearon exitosamente
+        logger.info(f"All {len(created_users)} staff users imported successfully")
+        return HttpResponse.custom(
+            message="Todos los usuarios importados correctamente",
+            response={
+                "created_count": len(created_users),
+                "error_count": 0,
+                "created_users": [
+                    {
+                        "nombre": user.nombre,
+                        "email": user.email,
+                        "dpi": user.dpi,
+                        "rol": user.rol
+                    }
+                    for user in created_users
+                ],
+                "validation_errors": [],
+                "db_errors": []
+            },
+            status_code=201
+        )
 
     except ExcelImportError as e:
         logger.error(f"Excel import error: {str(e)}")
@@ -502,13 +532,11 @@ async def api_import_staff(
         )
 
 
-
-
 @router.get(
     "/users/{user_id}",
     summary="Get staff user by ID",
     response_description="Staff user details retrieved successfully",
-    dependencies=[Depends(require_role(ADMIN, OPERATOR))]  # ✅ Admin y Operador
+    dependencies=[Depends(require_role(ADMIN, OPERATOR))]
 )
 def api_get_staff_user(
     user_id: int,
@@ -545,11 +573,11 @@ def api_get_staff_user(
         )
 
 
-@router.put(
+@router.patch(
     "/users/{user_id}",
     summary="Update staff user information",
     response_description="Staff user updated successfully",
-    dependencies=[Depends(require_role(ADMIN))]  # ✅ Solo admin
+    dependencies=[Depends(require_role(ADMIN))]
 )
 def api_update_staff_user(
     user_id: int,
@@ -602,6 +630,60 @@ def api_update_staff_user(
             error="Ocurrió un error inesperado al actualizar el usuario"
         )
 
+
+@router.delete(
+    "/users/{user_id}",
+    summary="Soft delete (deactivate) a staff user",
+    response_description="Staff user deactivated successfully",
+    dependencies=[Depends(require_role(ADMIN))]
+)
+def api_soft_delete_staff_user(
+    user_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Soft delete (deactivate) a staff user.
+
+    - Sets activo = False
+    - Modifies email and DPI with 'deleted_' prefix to free up credentials
+    - Preserves all user data for audit purposes
+    - Allows creating new users with the same original email/DPI
+
+    **Example:**
+    - Before: email@example.com, DPI: 1234567890123
+    - After: deleted_20251029195030_email@example.com, DELETED_20251029195030_1234567890123
+    """
+    try:
+        user = soft_delete_user(db, user_id)
+
+        if not user:
+            logger.warning(f"Staff user not found for deletion: {user_id}")
+            return HttpResponse.not_found(
+                error=f"Usuario con ID {user_id} no encontrado"
+            )
+
+        logger.info(f"Staff user deactivated: {user_id}")
+        return HttpResponse.success(
+            message="Usuario desactivado exitosamente"
+        )
+
+    except ValueError as ve:
+        logger.warning(f"Cannot delete user {user_id}: {str(ve)}")
+        return HttpResponse.bad_request(error=str(ve))
+
+    except SQLAlchemyError as se:
+        db.rollback()
+        logger.error(f"Database error deleting user {user_id}: {str(se)}")
+        return HttpResponse.internal_server_error(
+            error="Error de base de datos"
+        )
+
+    except Exception as e:
+        db.rollback()
+        logger.exception(f"Unexpected error deleting user {user_id}: {str(e)}")
+        return HttpResponse.internal_server_error(
+            error="Error inesperado al desactivar usuario"
+        )
 
 # ============================================
 # ENDPOINTS ESPECÍFICOS PARA VENDEDORES

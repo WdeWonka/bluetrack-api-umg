@@ -2,15 +2,35 @@ from typing import Any
 from fastapi.responses import JSONResponse
 
 class HttpResponse:
-   # BASE METHOD
+    """
+    Clase para estandarizar las respuestas HTTP del backend.
+
+    IMPORTANTE: Todos los métodos retornan HTTP 200 para que el frontend
+    pueda manejar los errores de negocio sin que caigan en el catch.
+    El statusCode interno indica el tipo de respuesta real.
+    """
+
+    # BASE METHOD
     @staticmethod
     def custom(message: str, response: Any = None, status_code: int = 200, error: Any = None):
+        """
+        Método base para crear respuestas personalizadas.
+
+        Args:
+            message: Mensaje descriptivo de la respuesta
+            response: Datos de respuesta (puede ser None en errores)
+            status_code: Código HTTP interno (200, 400, 409, etc.)
+            error: Mensaje de error (solo para respuestas de error)
+
+        Returns:
+            JSONResponse con HTTP 200 y statusCode interno
+        """
         return JSONResponse(
-            status_code=status_code,
+            status_code=200,  # ✅ Siempre HTTP 200
             content={
                 "message": message,
                 "response": response,
-                "statusCode": status_code,
+                "statusCode": status_code,  # ✅ Código interno
                 "error": error,
             },
         )

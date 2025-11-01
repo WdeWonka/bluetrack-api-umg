@@ -208,7 +208,8 @@ def search_customers(db: Session, query: str, skip: int = 0, limit: int = 10) ->
         .filter(
             or_(
                 Customer.nombre.ilike(search_pattern),
-                Customer.direccion.ilike(search_pattern)
+                Customer.direccion.ilike(search_pattern),
+                Customer.telefono.ilike(search_pattern)
             )
         )
         .order_by(Customer.id)
@@ -226,7 +227,8 @@ def count_search_results(db: Session, query: str) -> int:
         .filter(
             or_(
                 Customer.nombre.ilike(search_pattern),
-                Customer.direccion.ilike(search_pattern)
+                Customer.direccion.ilike(search_pattern),
+                Customer.telefono.ilike(search_pattern)
             )
         )
         .scalar()

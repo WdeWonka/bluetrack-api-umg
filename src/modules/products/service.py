@@ -6,6 +6,9 @@ from src.models.product import Product
 from src.modules.products.type import ProductCreate, ProductUpdate, BulkProductImport
 from src.utils.pdf_exporter import PDFReportGenerator
 from typing import List, Tuple
+from src.models.route import Route
+from src.models.route_inventory import RouteInventory
+from datetime import datetime
 from reportlab.lib.pagesizes import letter
 from src.utils.type_converters import decimal_to_str, safe_title
 from src.utils.excel_formatter import (
@@ -73,27 +76,182 @@ def update_product(
     return product
 
 
-def list_products(db: Session, skip: int = 0, limit: int = 10) -> list[Product]:
+
+def soft_delete_product(db: Session, product_id: int) -> Product:
     """
-    Lista productos con paginación
+    Desactiva un producto (soft delete).
+    Valida que el producto no esté en uso en rutas activas.
+    Modifica nombre para permitir reutilización.
 
     Args:
         db: Sesión de base de datos
-        skip: Número de registros a saltar (offset)
-        limit: Número máximo de registros a retornar
+        product_id: ID del producto a desactivar
+
+    Returns:
+        Product: Producto desactivado
+
+    Raises:
+        ValueError: Si el producto no existe, ya está inactivo,
+                   o está en uso en rutas activas
+    """
+    # 1. Obtener producto
+    product = db.query(Product).filter(Product.id == product_id).first()
+
+    if not product:
+        raise ValueError(f"Producto con ID {product_id} no existe")
+
+    if not product.activo:
+        raise ValueError("El producto ya está inactivo")
+
+    # 2. Verificar si está en uso en rutas PENDIENTES o EN_PROCESO
+    rutas_activas = (
+        db.query(Route)
+        .join(RouteInventory)
+        .filter(
+            RouteInventory.producto_id == product_id,
+            Route.estado.in_(['pendiente', 'en_proceso'])
+        )
+        .all()
+    )
+
+    if rutas_activas:
+        rutas_nombres = [f"'{r.nombre}' (ID: {r.id})" for r in rutas_activas]
+        raise ValueError(
+            f"No se puede desactivar el producto '{product.nombre}' porque "
+            f"está asignado a {len(rutas_activas)} ruta(s) activa(s): "
+            f"{', '.join(rutas_nombres)}"
+        )
+
+    # 3. Guardar valores originales para logs
+    original_nombre = product.nombre
+
+    # 4. Timestamp único para evitar colisiones
+    now = datetime.now()
+    timestamp = now.strftime("%d%H%M%S") + str(now.microsecond)[:1]
+
+    # 5. Desactivar y modificar nombre (máximo 120 caracteres)
+    product.activo = False
+    prefix = f"del_{timestamp}_"
+    max_nombre_length = 120 - len(prefix)
+    nombre_truncado = product.nombre[:max_nombre_length]
+    product.nombre = f"{prefix}{nombre_truncado}"
+
+
+    db.commit()
+    db.refresh(product)
+
+    logger.info(
+        f"✅ Product soft deleted: ID={product.id}, "
+        f"original_nombre='{original_nombre}'"
+    )
+
+    return product
+
+
+def check_product_usage(db: Session, product_id: int) -> dict:
+    """
+    Verifica el uso de un producto en el sistema.
+    Útil para mostrar advertencias antes de eliminar.
+
+    Args:
+        db: Sesión de base de datos
+        product_id: ID del producto
+
+    Returns:
+        dict: Información sobre el uso del producto
+    """
+    from src.models.orders import Order
+
+    product = db.query(Product).filter(Product.id == product_id).first()
+
+    if not product:
+        raise ValueError(f"Producto con ID {product_id} no existe")
+
+    # Contar rutas activas
+    rutas_pendientes = (
+        db.query(Route)
+        .join(RouteInventory)
+        .filter(
+            RouteInventory.producto_id == product_id,
+            Route.estado == 'pendiente'
+        )
+        .count()
+    )
+
+    rutas_en_proceso = (
+        db.query(Route)
+        .join(RouteInventory)
+        .filter(
+            RouteInventory.producto_id == product_id,
+            Route.estado == 'en_proceso'
+        )
+        .count()
+    )
+
+    rutas_completadas = (
+        db.query(Route)
+        .join(RouteInventory)
+        .filter(
+            RouteInventory.producto_id == product_id,
+            Route.estado == 'completada'
+        )
+        .count()
+    )
+
+    # Contar órdenes pendientes
+    ordenes_pendientes = (
+        db.query(Order)
+        .filter(
+            Order.producto_id == product_id,
+            Order.asignada == False
+        )
+        .count()
+    )
+
+    tiene_uso_activo = (rutas_pendientes + rutas_en_proceso + ordenes_pendientes) > 0
+
+    return {
+        "producto_id": product_id,
+        "nombre": product.nombre,
+        "stock_actual": product.stock_total,
+        "puede_eliminarse": not tiene_uso_activo,
+        "uso": {
+            "rutas_pendientes": rutas_pendientes,
+            "rutas_en_proceso": rutas_en_proceso,
+            "rutas_completadas": rutas_completadas,
+            "ordenes_pendientes": ordenes_pendientes
+        },
+        "mensaje": (
+            "El producto puede ser desactivado de forma segura"
+            if not tiene_uso_activo
+            else "⚠️ El producto está en uso activo. No se puede desactivar."
+        )
+    }
+
+def list_products(db: Session, skip: int = 0, limit: int = 10) -> list[Product]:
+    """
+    Lista productos ACTIVOS con paginación.
+
     """
     return (
         db.query(Product)
+        .filter(Product.activo == True)  #  Solo activos
         .order_by(Product.id)
         .offset(skip)
         .limit(limit)
         .all()
     )
 
-
 def count_products(db: Session) -> int:
-    """Cuenta el total de productos"""
-    return db.query(func.count(Product.id)).scalar()
+    """
+    Cuenta el total de productos ACTIVOS.
+
+    """
+    return (
+        db.query(func.count(Product.id))
+        .filter(Product.activo == True)  #  Solo activos
+        .scalar()
+    )
 
 
 def search_products(
@@ -103,18 +261,16 @@ def search_products(
     limit: int = 10
 ) -> list[Product]:
     """
-    Busca productos por nombre con paginación
+    Busca productos ACTIVOS por nombre con paginación.
 
-    Args:
-        db: Sesión de base de datos
-        query: Término de búsqueda
-        skip: Número de registros a saltar
-        limit: Número máximo de registros a retornar
     """
     search_pattern = f"%{query}%"
     return (
         db.query(Product)
-        .filter(Product.nombre.ilike(search_pattern))
+        .filter(
+            Product.nombre.ilike(search_pattern),
+            Product.activo == True  #  Solo activos
+        )
         .order_by(Product.id)
         .offset(skip)
         .limit(limit)
@@ -123,11 +279,17 @@ def search_products(
 
 
 def count_search_results(db: Session, query: str) -> int:
-    """Cuenta el total de resultados de búsqueda"""
+    """
+    Cuenta el total de resultados de búsqueda (solo activos).
+
+    """
     search_pattern = f"%{query}%"
     return (
         db.query(func.count(Product.id))
-        .filter(Product.nombre.ilike(search_pattern))
+        .filter(
+            Product.nombre.ilike(search_pattern),
+            Product.activo == True  #  Solo activos
+        )
         .scalar()
     )
 
@@ -272,23 +434,22 @@ def import_products_from_excel(
         logger.exception(f"Unexpected error during Excel import: {str(e)}")
         raise Exception(f"Error procesando el archivo Excel: {str(e)}")
 
-
 def export_products_to_excel(db: Session) -> bytes:
     """
-    Exporta productos a un archivo Excel.
+    Exporta productos ACTIVOS a un archivo Excel.
 
-    Args:
-        db: Sesión de base de datos
-
-    Returns:
-        bytes: Contenido del archivo Excel
     """
     try:
-        # Obtener todos los productos ordenados por nombre
-        products = db.query(Product).order_by(Product.nombre).all()
+        # Obtener solo productos ACTIVOS ordenados por nombre
+        products = (
+            db.query(Product)
+            .filter(Product.activo == True)  #  Solo activos
+            .order_by(Product.nombre)
+            .all()
+        )
 
         if not products:
-            logger.warning("No products found to export")
+            logger.warning("No active products found to export")
             data = []
         else:
             data = []
@@ -296,16 +457,15 @@ def export_products_to_excel(db: Session) -> bytes:
                 data.append({
                     "nombre": safe_title(product.nombre),
                     "precio": decimal_to_str(product.precio),
-                    "stock_total": str(product.stock_total)  # ✨ int → str
+                    "stock_total": str(product.stock_total)
                 })
 
-            logger.info(f"Exporting {len(products)} products to Excel")
+            logger.info(f"Exporting {len(products)} active products to Excel")
 
-        # Generar Excel
         excel_file = export_to_excel(
             data=data,
-            filename="productos.xlsx",  # ✨ Corregido
-            sheet_name="Productos"  # ✨ Corregido
+            filename="productos.xlsx",
+            sheet_name="Productos"
         )
 
         return excel_file.getvalue()
@@ -317,37 +477,34 @@ def export_products_to_excel(db: Session) -> bytes:
 
 def export_products_to_pdf(db: Session) -> bytes:
     """
-    Exporta productos a un archivo PDF.
+    Exporta productos ACTIVOS a un archivo PDF.
 
-    Args:
-        db: Sesión de base de datos
-
-    Returns:
-        bytes: Contenido del archivo PDF
     """
     try:
-        # Obtener todos los productos ordenados por nombre
-        products = db.query(Product).order_by(Product.nombre).all()
+        # Obtener solo productos ACTIVOS ordenados por nombre
+        products = (
+            db.query(Product)
+            .filter(Product.activo == True)  #  Solo activos
+            .order_by(Product.nombre)
+            .all()
+        )
 
         if not products:
-            logger.warning("No products found to export")
+            logger.warning("No active products found to export")
             data = []
         else:
-            # Convertir a diccionarios
             data = []
             for product in products:
                 data.append({
                     "nombre": safe_title(product.nombre),
-                    "precio": f"Q{decimal_to_str(product.precio)}",  # ✨ Formato moneda
-                    "stock_total": str(product.stock_total)  # ✨ int → str
+                    "precio": f"Q{decimal_to_str(product.precio)}",
+                    "stock_total": str(product.stock_total)
                 })
 
-            logger.info(f"Exporting {len(products)} products to PDF")
+            logger.info(f"Exporting {len(products)} active products to PDF")
 
-        # Anchos personalizados para las columnas (en puntos)
-        col_widths = [200.0, 100.0, 100.0]  # ✨ Ajustados
+        col_widths = [200.0, 100.0, 100.0]
 
-        # Generar PDF con anchos personalizados
         generator = PDFReportGenerator(
             title="REPORTE DE PRODUCTOS",
             page_size=letter,

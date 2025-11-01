@@ -11,6 +11,8 @@ from src.models.delivery import Delivery
 from src.models.orders import Order
 from src.modules.routes.type import RouteDetailUpdateStatus, EstadoEntrega
 from src.modules.routes.inventory_service import update_inventory_after_delivery
+from src.utils.product_helpers import get_product_display_name_from_order
+
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +273,7 @@ def get_route_detail_with_orders(
             {
                 "orden_id": o.id,
                 "producto_id": o.producto_id,
-                "producto_nombre": o.producto.nombre,
+                "producto_nombre": get_product_display_name_from_order(o),
                 "cantidad_ordenada": o.cantidad,
                 "cantidad_entregada": _get_cantidad_entregada(db, o.id),
                 "cantidad_pendiente": o.cantidad - _get_cantidad_entregada(db, o.id),

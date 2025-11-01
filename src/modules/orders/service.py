@@ -8,6 +8,7 @@ from src.models.product import Product
 from src.modules.orders.type import OrderCreate, OrderUpdate
 from src.utils.pdf_exporter import PDFReportGenerator
 from reportlab.lib.pagesizes import letter
+from src.utils.product_helpers import get_product_display_name_from_order
 from src.utils.type_converters import safe_title
 from src.utils.date_parser import parse_date_flexible, parse_date_string
 from src.utils.excel_formatter import (
@@ -22,18 +23,34 @@ logger = logging.getLogger(__name__)
 
 def create_order(db: Session, order_data: OrderCreate) -> Order:
     """Crea una nueva orden de cliente."""
+
+    # ✅ Verificar que el producto existe y obtener su nombre
+    producto = db.query(Product).filter(
+        Product.id == order_data.producto_id,
+        Product.activo == True  # Solo productos activos
+    ).first()
+
+    if not producto:
+        raise ValueError(f"Producto con ID {order_data.producto_id} no existe o está inactivo")
+
+    # ✅ Verificar que el cliente existe
+    cliente = db.query(Customer).filter(Customer.id == order_data.cliente_id).first()
+    if not cliente:
+        raise ValueError(f"Cliente con ID {order_data.cliente_id} no existe")
+
     order = Order(
         cliente_id=order_data.cliente_id,
         producto_id=order_data.producto_id,
+        producto_nombre_snapshot=producto.nombre,  # ✅ GUARDAR SNAPSHOT
         cantidad=order_data.cantidad,
-        prioridad="normal",  # Ahora viene validado desde OrderCreate
-        fecha_solicitud=order_data.fecha_solicitud  # Ya viene como datetime del validator
+        prioridad="normal",
+        fecha_solicitud=order_data.fecha_solicitud
     )
+
     db.add(order)
     db.commit()
     db.refresh(order)
     return order
-
 
 def get_order(db: Session, order_id: int) -> Order | None:
     """Obtiene una orden por su ID"""
@@ -41,41 +58,43 @@ def get_order(db: Session, order_id: int) -> Order | None:
 
 
 def update_order(db: Session, order_id: int, order_data: OrderUpdate) -> Order | None:
-    """
-    Actualiza una orden existente.
-
-    Raises:
-        SQLAlchemyError: Para errores de base de datos
-
-    Returns:
-        Order | None: Orden actualizada o None si no existe
-    """
+    """Actualiza una orden existente."""
     order = get_order(db, order_id)
     if not order:
         return None
 
     if order_data.cliente_id is not None:
         order.cliente_id = order_data.cliente_id
+
+    # ✅ Si se cambia el producto, actualizar snapshot
     if order_data.producto_id is not None:
+        producto = db.query(Product).filter(
+            Product.id == order_data.producto_id,
+            Product.activo == True
+        ).first()
+
+        if not producto:
+            raise ValueError(f"Producto con ID {order_data.producto_id} no existe o está inactivo")
+
         order.producto_id = order_data.producto_id
+        order.producto_nombre_snapshot = producto.nombre  # ✅ ACTUALIZAR SNAPSHOT
+
     if order_data.cantidad is not None:
         order.cantidad = order_data.cantidad
+
     if order_data.fecha_solicitud is not None:
-        # Si llega como string, conviértelo a datetime
         if isinstance(order_data.fecha_solicitud, str):
             parsed_date = parse_date_flexible(order_data.fecha_solicitud)
             if parsed_date:
-                order.fecha_solicitud = parsed_date # type: ignore
+                order.fecha_solicitud = parsed_date  # type: ignore[attr-defined]
             else:
                 raise ValueError(f"Formato de fecha inválido: {order_data.fecha_solicitud}")
         else:
-            order.fecha_solicitud = order_data.fecha_solicitud # type: ignore
-
+            order.fecha_solicitud = order_data.fecha_solicitud  # type: ignore[attr-defined]
 
     db.commit()
     db.refresh(order)
     return order
-
 
 def list_orders(db: Session, skip: int = 0, limit: int = 10) -> list[Order]:
     """
@@ -107,28 +126,30 @@ def search_customers_for_order(
 ) -> List[dict]:
     """
     Busca clientes por nombre o teléfono para usar en el selector de órdenes.
-
-    Args:
-        db: Sesión de base de datos
-        query: Término de búsqueda (nombre o teléfono)
-        limit: Número máximo de resultados
-
-    Returns:
-        Lista de diccionarios con id, nombre, telefono y direccion
+    Si query está vacío, retorna los primeros N clientes.
     """
-    search_pattern = f"%{query}%"
-
-    customers = (
-        db.query(Customer)
-        .filter(
-            or_(
-                Customer.nombre.ilike(search_pattern),
-                Customer.telefono.ilike(search_pattern)
-            )
+    # 🆕 Si no hay query, retornar los primeros clientes
+    if not query or len(query.strip()) == 0:
+        customers = (
+            db.query(Customer)
+            .order_by(Customer.nombre)  # Ordenar alfabéticamente
+            .limit(limit)
+            .all()
         )
-        .limit(limit)
-        .all()
-    )
+    else:
+        search_pattern = f"%{query}%"
+        customers = (
+            db.query(Customer)
+            .filter(
+                or_(
+                    Customer.nombre.ilike(search_pattern),
+                    Customer.telefono.ilike(search_pattern)
+                )
+            )
+            .order_by(Customer.nombre)
+            .limit(limit)
+            .all()
+        )
 
     return [
         {
@@ -148,23 +169,29 @@ def search_products_for_order(
 ) -> List[dict]:
     """
     Busca productos por nombre para usar en el selector de órdenes.
-
-    Args:
-        db: Sesión de base de datos
-        query: Término de búsqueda (nombre del producto)
-        limit: Número máximo de resultados
-
-    Returns:
-        Lista de diccionarios con id, nombre, precio y stock
+    Si query está vacío, retorna los primeros N productos.
     """
-    search_pattern = f"%{query}%"
-
-    products = (
-        db.query(Product)
-        .filter(Product.nombre.ilike(search_pattern))
-        .limit(limit)
-        .all()
-    )
+    # 🆕 Si no hay query, retornar los primeros productos
+    if not query or len(query.strip()) == 0:
+        products = (
+            db.query(Product)
+            .filter(Product.activo == True)  # Solo productos activos
+            .order_by(Product.nombre)  # Ordenar alfabéticamente
+            .limit(limit)
+            .all()
+        )
+    else:
+        search_pattern = f"%{query}%"
+        products = (
+            db.query(Product)
+            .filter(
+                Product.nombre.ilike(search_pattern),
+                Product.activo == True  # Solo productos activos
+            )
+            .order_by(Product.nombre)
+            .limit(limit)
+            .all()
+        )
 
     return [
         {
@@ -175,7 +202,6 @@ def search_products_for_order(
         }
         for p in products
     ]
-
 
 def search_orders_by_client_or_phone(
     db: Session,
@@ -484,7 +510,7 @@ def export_orders_to_excel(db: Session) -> bytes:
                     "id": order.id,
                     "cliente_nombre": safe_title(order.cliente.nombre),
                     "cliente_direccion": safe_title(order.cliente.direccion),
-                    "producto_nombre": safe_title(order.producto.nombre),
+                    "producto_nombre": safe_title(get_product_display_name_from_order(order)),
                     "cantidad": order.cantidad,
                     "fecha_solicitud": parse_date_string(order.fecha_solicitud)
                 })
@@ -525,7 +551,7 @@ def export_orders_to_pdf(db: Session) -> bytes:
                     "id": order.id,
                     "Cliente": safe_title(order.cliente.nombre),
                     "Direccion": safe_title(order.cliente.direccion),
-                    "Producto": safe_title(order.producto.nombre),
+                    "Producto": safe_title(get_product_display_name_from_order(order)),
                     "Cantidad": order.cantidad,
                     "Fecha Solicitud": parse_date_string(order.fecha_solicitud)
                 })

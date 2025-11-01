@@ -6,6 +6,7 @@ from typing import List, Tuple, Optional
 from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from datetime import datetime
 
 from src.models.user import User
 from src.common.types.userType import StaffCreate, UserUpdate, BulkStaffImport, UserRead
@@ -131,9 +132,7 @@ def list_users(
     limit: int = 10
 ) -> list[User]:
     """
-    Lista TODOS los usuarios de staff (operadores y vendedores) con paginación.
-
-    Esta función trae ambos roles sin necesidad de filtro.
+    Lista TODOS los usuarios de staff ACTIVOS (operadores y vendedores) con paginación.
 
     Args:
         db: Sesión de base de datos
@@ -141,21 +140,24 @@ def list_users(
         limit: Número máximo de registros a retornar
 
     Returns:
-        Lista de usuarios del staff (operadores y vendedores)
+        Lista de usuarios del staff activos (operadores y vendedores)
     """
     query = db.query(User).filter(
-        User.rol.in_([OPERATOR.lower(), SELLER.lower()])
+        User.rol.in_([OPERATOR.lower(), SELLER.lower()]),
+        User.activo == True  # ✅ Solo usuarios activos
     )
 
     return query.order_by(User.id.desc()).offset(skip).limit(limit).all()
 
 def count_users(db: Session) -> int:
     """
-    Cuenta el total de usuarios de staff (operadores y vendedores).
+    Cuenta el total de usuarios de staff ACTIVOS (operadores y vendedores).
     """
     return db.query(func.count(User.id)).filter(
-        User.rol.in_([OPERATOR.lower(), SELLER.lower()])
+        User.rol.in_([OPERATOR.lower(), SELLER.lower()]),
+        User.activo == True  # ✅ Solo usuarios activos
     ).scalar()
+
 
 def search_users(
     db: Session,
@@ -165,7 +167,7 @@ def search_users(
     limit: int = 5
 ) -> list[User]:
     """
-    Busca usuarios de staff por nombre o DPI con paginación
+    Busca usuarios de staff ACTIVOS por nombre o DPI con paginación
 
     Args:
         db: Sesión de base de datos
@@ -179,8 +181,10 @@ def search_users(
     db_query = db.query(User).filter(
         or_(
             User.nombre.ilike(search_pattern),
-            User.dpi.ilike(search_pattern)
-        )
+            User.dpi.ilike(search_pattern),
+            User.rol.ilike(search_pattern)
+        ),
+        User.activo == True  # ✅ Solo usuarios activos
     )
 
     if role:
@@ -192,14 +196,16 @@ def search_users(
 
 
 def count_search_results(db: Session, query: str, role: Optional[str] = None) -> int:
-    """Cuenta el total de resultados de una búsqueda"""
+    """Cuenta el total de resultados de una búsqueda (solo activos)"""
     search_pattern = f"%{query}%"
 
     db_query = db.query(func.count(User.id)).filter(
         or_(
             User.nombre.ilike(search_pattern),
-            User.dpi.ilike(search_pattern)
-        )
+            User.dpi.ilike(search_pattern),
+            User.rol.ilike(search_pattern)
+        ),
+        User.activo == True  # ✅ Solo usuarios activos
     )
 
     if role:
@@ -208,7 +214,6 @@ def count_search_results(db: Session, query: str, role: Optional[str] = None) ->
         db_query = db_query.filter(User.rol.in_([OPERATOR.lower(), SELLER.lower()]))
 
     return db_query.scalar()
-
 
 def get_available_sellers_by_date(
     db: Session,
@@ -348,7 +353,7 @@ def import_users_from_excel(
                     dpi=item.dpi,
                     email=item.email,
                     password=item.password,
-                    rol=item.rol  # ✅ Rol desde el Excel
+                    rol=item.rol
                 )
 
                 user = create_user(db, user_data)
@@ -416,10 +421,9 @@ def import_users_from_excel(
         logger.exception(f"Unexpected error during Excel import: {str(e)}")
         raise Exception(f"Error procesando el archivo Excel: {str(e)}")
 
-
 def export_users_to_excel(db: Session, role: Optional[str] = None) -> bytes:
     """
-    Exporta usuarios de staff a Excel.
+    Exporta usuarios de staff ACTIVOS a Excel.
 
     Args:
         db: Sesión de base de datos
@@ -429,7 +433,7 @@ def export_users_to_excel(db: Session, role: Optional[str] = None) -> bytes:
         bytes: Contenido del archivo Excel
     """
     try:
-        query = db.query(User)
+        query = db.query(User).filter(User.activo == True)  # ✅ Solo usuarios activos
 
         if role:
             query = query.filter(User.rol == role.lower())
@@ -439,7 +443,7 @@ def export_users_to_excel(db: Session, role: Optional[str] = None) -> bytes:
         users = query.order_by(User.id).all()
 
         if not users:
-            logger.warning(f"No staff users found with role: {role}")
+            logger.warning(f"No active staff users found with role: {role}")
             data = []
         else:
             data = [
@@ -451,7 +455,7 @@ def export_users_to_excel(db: Session, role: Optional[str] = None) -> bytes:
                 }
                 for user in users
             ]
-            logger.info(f"Exporting {len(users)} staff users")
+            logger.info(f"Exporting {len(users)} active staff users")
 
         # Generar Excel
         filename = f"staff_{role if role else 'todos'}.xlsx"
@@ -470,7 +474,7 @@ def export_users_to_excel(db: Session, role: Optional[str] = None) -> bytes:
 
 def export_users_to_pdf(db: Session, role: Optional[str] = None) -> bytes:
     """
-    Exporta usuarios de staff a PDF.
+    Exporta usuarios de staff ACTIVOS a PDF.
 
     Args:
         db: Sesión de base de datos
@@ -480,7 +484,7 @@ def export_users_to_pdf(db: Session, role: Optional[str] = None) -> bytes:
         bytes: Contenido del archivo PDF
     """
     try:
-        query = db.query(User)
+        query = db.query(User).filter(User.activo == True)  # ✅ Solo usuarios activos
 
         if role:
             query = query.filter(User.rol == role.lower())
@@ -490,7 +494,7 @@ def export_users_to_pdf(db: Session, role: Optional[str] = None) -> bytes:
         users = query.order_by(User.nombre).all()
 
         if not users:
-            logger.warning(f"No staff users found with role: {role}")
+            logger.warning(f"No active staff users found with role: {role}")
             data = []
         else:
             data = []
@@ -505,7 +509,7 @@ def export_users_to_pdf(db: Session, role: Optional[str] = None) -> bytes:
                     "rol": rol_val.capitalize() if rol_val else ""
                 })
 
-            logger.info(f"Exporting {len(users)} staff users to PDF")
+            logger.info(f"Exporting {len(users)} active staff users to PDF")
 
         # Anchos de columnas
         col_widths = [110.0, 140.0, 160.0, 80.0]
@@ -530,3 +534,39 @@ def export_users_to_pdf(db: Session, role: Optional[str] = None) -> bytes:
     except Exception as e:
         logger.exception(f"Error exporting staff to PDF: {str(e)}")
         raise Exception(f"Error al exportar staff a PDF: {str(e)}")
+
+
+def soft_delete_user(db: Session, user_id: int) -> User | None:
+    """
+    Desactiva un usuario (soft delete).
+    Modifica email y DPI para permitir reutilización de credenciales.
+
+    El DPI se modifica agregando prefijo 'del_' + secuencia numérica
+    Formato: del_000000001 (13 caracteres, igual que un DPI normal)
+    """
+    user = get_user(db, user_id)
+    if not user:
+        return None
+
+    if not user.activo:
+        raise ValueError("El usuario ya está inactivo")
+
+    # Guardar valores originales para logs
+    original_email = user.email
+    original_dpi = user.dpi
+
+    # Timestamp como secuencia única (formato: DDHHMMSS + milisegundos truncado)
+    # Día(2) + Hora(2) + Minuto(2) + Segundo(2) + Milisegundos(1) = 9 dígitos
+    now = datetime.now()
+    timestamp = now.strftime("%d%H%M%S") + str(now.microsecond)[:1]
+
+    # ✅ Simple y efectivo: del_ + timestamp de 9 dígitos
+    setattr(user, "activo", False)
+    setattr(user, "email", f"del_{timestamp}_{user.email}")
+    setattr(user, "dpi", f"del_{timestamp}")  # del_291231459 = 13 caracteres exactos
+
+    db.commit()
+    db.refresh(user)
+
+    logger.info(f"✅ User soft deleted: ID={user.id}, original_email={original_email}, original_dpi={original_dpi}")
+    return user

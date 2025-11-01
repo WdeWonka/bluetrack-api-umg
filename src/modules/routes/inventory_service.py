@@ -9,6 +9,8 @@ from src.models.route import Route
 from src.models.route_inventory import RouteInventory
 from src.models.product import Product
 from src.modules.routes.type import EstadoRuta
+from src.utils.product_helpers import get_product_display_name
+
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +172,7 @@ def return_remaining_stock_to_warehouse(
             total_devuelto += cantidad_devuelta
             productos_devueltos.append({
                 "producto_id": int(item.producto_id),
-                "nombre": producto.nombre,
+                "nombre": get_product_display_name(producto),
                 "cantidad_devuelta": cantidad_devuelta
             })
 
@@ -231,7 +233,7 @@ def get_route_inventory_status(
 
         productos.append({
             "producto_id": int(item.producto_id),
-            "nombre": producto.nombre if producto else "Desconocido",
+            "nombre": get_product_display_name(item.producto),
             "cantidad_inicial": cantidad_inicial_int,
             "cantidad_actual": cantidad_final_int,
             "cantidad_entregada": cantidad_entregada,

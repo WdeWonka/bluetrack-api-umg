@@ -11,6 +11,8 @@ from src.models.route_detail import RouteDetail
 from src.models.orders import Order
 from src.models.delivery import Delivery
 from src.models.route_inventory import RouteInventory
+from src.utils.product_helpers import get_product_display_name_from_order
+
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +71,7 @@ def calculate_client_financial_info(
 
         productos_info.append({
             "producto_id": orden.producto_id,
-            "producto_nombre": orden.producto.nombre,
+            "producto_nombre": get_product_display_name_from_order(orden),
             "precio_unitario": float(precio_unitario),
             "cantidad_ordenada": cantidad_ordenada,
             "cantidad_entregada": cantidad_entregada,

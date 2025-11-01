@@ -5,7 +5,7 @@ from pydantic import BaseModel, EmailStr, ConfigDict, StringConstraints, field_v
 from datetime import datetime
 from src.common.constants.roles import ADMIN, OPERATOR, SELLER
 
-DPIType = Annotated[str, StringConstraints(min_length=13, max_length=13)]
+DPIType = Annotated[str, StringConstraints(min_length=13, max_length=50)]
 
 def validate_password(password: str) -> tuple[bool, str]:
     """
@@ -49,6 +49,17 @@ class UserUpdate(BaseModel):
     email: EmailStr | None = None
     password: str | None = None
 
+    @field_validator('dpi')
+    @classmethod
+    def validate_dpi(cls, v: str | None) -> str | None:
+        """Valida DPI solo si no tiene prefijo DELETED_"""
+        if v is not None and not v.startswith('DELETED_'):
+            clean_dpi = v.replace(' ', '').replace('-', '')
+            if not re.match(r'^\d{13}$', clean_dpi):
+                raise ValueError('El DPI debe tener exactamente 13 dígitos numéricos')
+            return clean_dpi
+        return v
+
 
 class UserRead(BaseModel):
     """Schema de lectura para todos los usuarios"""
@@ -75,6 +86,18 @@ class StaffCreate(UserBase):
     password: str
     rol: str  # 'operador' o 'vendedor'
 
+    @field_validator('dpi')
+    @classmethod
+    def validate_dpi(cls, v: str) -> str:
+        """Valida que el DPI tenga 13 dígitos numéricos (no permite DELETED_)"""
+        if v.startswith('DELETED_'):
+            raise ValueError('No se puede crear un usuario con DPI marcado como eliminado')
+
+        clean_dpi = v.replace(' ', '').replace('-', '')
+        if not re.match(r'^\d{13}$', clean_dpi):
+            raise ValueError('El DPI debe tener exactamente 13 dígitos numéricos')
+        return clean_dpi
+
     @field_validator('rol')
     @classmethod
     def validate_rol(cls, v: str) -> str:
@@ -98,7 +121,7 @@ class BulkStaffImport(BaseModel):
     dpi: str
     email: str
     password: str
-    rol: str  # ✅ Incluye rol en el Excel
+    rol: str
 
     @field_validator('nombre', 'email', 'password', 'dpi', 'rol')
     @classmethod
@@ -138,6 +161,7 @@ class BulkStaffImport(BaseModel):
         if v not in [OPERATOR.lower(), SELLER.lower()]:
             raise ValueError(f"Rol debe ser '{OPERATOR}' o '{SELLER}'")
         return v
+
 
 
 # ============================================

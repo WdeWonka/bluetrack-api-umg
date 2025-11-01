@@ -111,7 +111,8 @@ def search_warehouses(db: Session, query: str, skip: int = 0, limit: int = 10) -
         .filter(
             or_(
                 Warehouse.nombre.ilike(search_pattern),
-                Warehouse.direccion.ilike(search_pattern)
+                Warehouse.direccion.ilike(search_pattern),
+                Warehouse.telefono.ilike(search_pattern)
             )
         )
         .order_by(Warehouse.id)
@@ -128,7 +129,8 @@ def count_search_results(db: Session, query: str) -> int:
         .filter(
             or_(
                 Warehouse.nombre.ilike(search_pattern),
-                Warehouse.direccion.ilike(search_pattern)
+                Warehouse.direccion.ilike(search_pattern),
+                Warehouse.telefono.ilike(search_pattern)
             )
         )
         .scalar()

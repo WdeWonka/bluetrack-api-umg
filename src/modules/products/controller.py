@@ -12,7 +12,10 @@ from src.modules.products.service import (
     count_search_results,
     import_products_from_excel,
     export_products_to_excel,
-    export_products_to_pdf
+    export_products_to_pdf,
+    soft_delete_product,
+    check_product_usage
+
 )
 from src.utils.excel_formatter import ExcelImportError, create_template_excel
 from src.modules.products.type import ProductCreate, ProductUpdate, ProductRead
@@ -27,7 +30,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/products",
     tags=["products"],
-    dependencies=[Depends(require_role([ADMIN]))]
+    dependencies=[Depends(require_role(ADMIN))]
+
 )
 
 
@@ -182,6 +186,13 @@ async def api_import_products(
     - Product names must be unique
     - Prices must be positive numbers
     - Stock must be between 0 and 50,000
+
+    **Status Codes:**
+    - 201: All products imported successfully
+    - 207: Partial import (some products created, some failed)
+    - 409: No products imported (all duplicates)
+    - 422: Validation errors in Excel format
+    - 400: Invalid file or other errors
     """
     # Validar que el archivo tenga nombre
     if not file.filename:
@@ -201,27 +212,8 @@ async def api_import_products(
             import_products_from_excel(file=file, db=db)
         )
 
-        if not validation_errors and not db_errors:
-            logger.info(
-                f"All {len(created_products)} products imported successfully"
-            )
-            return HttpResponse.custom(
-                message=f"Se crearon {len(created_products)} productos exitosamente",
-                response={
-                    "created_count": len(created_products),
-                    "products": [
-                        {
-                            "nombre": product.nombre,
-                            "precio": decimal_to_str(product.precio),
-                            "stock_total": product.stock_total
-                        }
-                        for product in created_products
-                    ]
-                },
-                status_code=201
-            )
-
-        elif validation_errors and not db_errors:
+        # CASO 1: ❌ Errores de validación (formato Excel incorrecto)
+        if validation_errors:
             logger.warning(
                 f"Import failed with {len(validation_errors)} validation errors"
             )
@@ -229,20 +221,39 @@ async def api_import_products(
                 message="El archivo contiene errores de validación. "
                         "No se creó ningún producto.",
                 response={
+                    "created_count": 0,
+                    "error_count": len(validation_errors),
                     "validation_errors": validation_errors,
-                    "total_errors": len(validation_errors)
+                    "db_errors": []
                 },
-                status_code=422
+                status_code=422  # Unprocessable Entity
             )
 
-        else:
+        # CASO 2: 🔴 NO se creó NINGÚN producto (todos duplicados)
+        if len(created_products) == 0 and len(db_errors) > 0:
+            logger.warning(
+                f"Import failed: all {len(db_errors)} products are duplicates"
+            )
+            return HttpResponse.custom(
+                message="Todos los productos ya existen en el sistema",
+                response={
+                    "created_count": 0,
+                    "error_count": len(db_errors),
+                    "validation_errors": [],
+                    "db_errors": db_errors
+                },
+                status_code=409  # Conflict
+            )
+
+        # CASO 3: 🟡 Importación PARCIAL (algunos creados, algunos fallaron)
+        if len(created_products) > 0 and len(db_errors) > 0:
             logger.info(
                 f"Partial import: {len(created_products)} created, "
                 f"{len(db_errors)} failed"
             )
             return HttpResponse.custom(
-                message=f"Se crearon {len(created_products)} productos. "
-                        f"{len(db_errors)} productos no se pudieron crear.",
+                message=f"Se importaron {len(created_products)} de "
+                        f"{len(created_products) + len(db_errors)} productos",
                 response={
                     "created_count": len(created_products),
                     "error_count": len(db_errors),
@@ -254,10 +265,34 @@ async def api_import_products(
                         }
                         for product in created_products
                     ],
+                    "validation_errors": [],
                     "db_errors": db_errors
                 },
-                status_code=200
+                status_code=207  # Multi-Status (partial success)
             )
+
+        # CASO 4: ✅ TODOS los productos se crearon exitosamente
+        logger.info(
+            f"All {len(created_products)} products imported successfully"
+        )
+        return HttpResponse.custom(
+            message=f"Todos los productos importados correctamente",
+            response={
+                "created_count": len(created_products),
+                "error_count": 0,
+                "created_products": [
+                    {
+                        "nombre": product.nombre,
+                        "precio": decimal_to_str(product.precio),
+                        "stock_total": product.stock_total
+                    }
+                    for product in created_products
+                ],
+                "validation_errors": [],
+                "db_errors": []
+            },
+            status_code=201  # Created
+        )
 
     except ExcelImportError as e:
         logger.error(f"Excel import error: {str(e)}")
@@ -268,7 +303,6 @@ async def api_import_products(
         return HttpResponse.internal_server_error(
             error="Ocurrió un error inesperado al procesar el archivo"
         )
-
 
 @router.get(
     "/export/excel",
@@ -392,6 +426,102 @@ def api_download_product_template():
             error="Ocurrió un error al generar el template de productos"
         )
 
+
+
+@router.get(
+    "/{product_id}/usage",
+    summary="Check product usage in the system",
+    response_description="Product usage information"
+)
+def api_check_product_usage(
+    product_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Verifica si un producto está en uso en el sistema.
+
+    **Útil antes de intentar eliminar un producto.**
+
+    **Returns:**
+    - Información sobre rutas y órdenes que usan el producto
+    - Indicador si puede ser eliminado de forma segura
+    """
+    try:
+        usage_info = check_product_usage(db, product_id)
+
+        return HttpResponse.success(
+            message="Información de uso del producto obtenida correctamente",
+            response=usage_info
+        )
+
+    except ValueError as ve:
+        logger.warning(f"Validation error checking product usage: {str(ve)}")
+        return HttpResponse.not_found(error=str(ve))
+
+    except Exception as e:
+        logger.exception(
+            f"Unexpected error checking product usage {product_id}: {str(e)}"
+        )
+        return HttpResponse.internal_server_error(
+            error="Ocurrió un error al verificar el uso del producto"
+        )
+
+
+@router.delete(
+    "/{product_id}",
+    summary="Soft delete a product",
+    response_description="Product deactivated successfully"
+)
+def api_delete_product(
+    product_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Desactiva un producto (soft delete).
+
+    **Validaciones:**
+    - El producto no debe estar en rutas PENDIENTES o EN_PROCESO
+    - El producto no debe estar en órdenes pendientes de asignar
+
+    **Path parameters:**
+    - product_id: ID del producto a desactivar
+
+    **Nota:** El producto se marca como inactivo pero NO se elimina
+    de la base de datos. Su nombre se modifica para permitir crear
+    uno nuevo con el mismo nombre.
+    """
+    try:
+        product = soft_delete_product(db, product_id)
+
+        logger.info(f"Product {product_id} soft deleted successfully")
+        return HttpResponse.success(
+            message=f"Producto desactivado correctamente",
+            response={
+                "id": product.id,
+                "nombre_original": product.nombre.split('_', 2)[-1] if 'del_' in product.nombre else product.nombre,
+                "activo": product.activo
+            }
+        )
+
+    except ValueError as ve:
+        logger.warning(f"Validation error deleting product {product_id}: {str(ve)}")
+
+        # Diferenciar tipos de error
+        if "no existe" in str(ve):
+            return HttpResponse.not_found(error=str(ve))
+        elif "ya está inactivo" in str(ve):
+            return HttpResponse.conflict(error=str(ve))
+        elif "está asignado" in str(ve) or "en uso" in str(ve):
+            return HttpResponse.conflict(error=str(ve))
+        else:
+            return HttpResponse.bad_request(error=str(ve))
+
+    except Exception as e:
+        db.rollback()
+        logger.exception(f"Unexpected error deleting product {product_id}: {str(e)}")
+        return HttpResponse.internal_server_error(
+            error="Ocurrió un error inesperado al desactivar el producto"
+        )
 
 @router.get(
     "/{product_id}",
