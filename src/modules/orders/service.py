@@ -1,12 +1,13 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import func, or_
-from typing import List, Optional, Tuple
+from sqlalchemy import func, or_, cast, Date
+from typing import List, Optional, Tuple, cast
 import logging
+from datetime import datetime, date
 from src.models.orders import Order
 from src.models.customer import Customer
 from src.models.product import Product
 from src.modules.orders.type import OrderCreate, OrderUpdate
-from src.utils.pdf_exporter import PDFReportGenerator
+from src.utils.pdf_generator import PDFReportOrder
 from reportlab.lib.pagesizes import letter
 from src.utils.product_helpers import get_product_display_name_from_order
 from src.utils.type_converters import safe_title
@@ -20,37 +21,113 @@ from src.utils.excel_formatter import (
 
 logger = logging.getLogger(__name__)
 
-
 def create_order(db: Session, order_data: OrderCreate) -> Order:
-    """Crea una nueva orden de cliente."""
+    """
+    Crea una nueva orden y RESERVA el stock (sin descontarlo del stock_total).
+    El stock_total solo se descuenta cuando se crea la ruta.
+    """
 
-    # ✅ Verificar que el producto existe y obtener su nombre
+    # ✅ Verificar producto
     producto = db.query(Product).filter(
         Product.id == order_data.producto_id,
-        Product.activo == True  # Solo productos activos
+        Product.activo == True
     ).first()
 
     if not producto:
         raise ValueError(f"Producto con ID {order_data.producto_id} no existe o está inactivo")
 
-    # ✅ Verificar que el cliente existe
+    # ✅ Verificar cliente
     cliente = db.query(Customer).filter(Customer.id == order_data.cliente_id).first()
     if not cliente:
         raise ValueError(f"Cliente con ID {order_data.cliente_id} no existe")
 
+    # 🔥 VALIDAR STOCK DISPONIBLE (stock_total - stock_reservado)
+    stock_total = producto.stock_total or 0
+    stock_reservado = producto.stock_reservado or 0
+    stock_disponible = stock_total - stock_reservado
+
+    if stock_disponible < order_data.cantidad:
+        raise ValueError(
+            f"Stock insuficiente para {producto.nombre}. "
+            f"Disponible: {stock_disponible} (Total: {stock_total}, "
+            f"Reservado: {stock_reservado}), Solicitado: {order_data.cantidad}"
+        )
+
+    # 🔥 RESERVAR STOCK (NO descontar de stock_total todavía)
+    producto.stock_reservado = stock_reservado + order_data.cantidad
+
+    # 🔧 El validador de Pydantic ya convirtió fecha_solicitud a datetime
+    # Si no se proporcionó, ya tiene datetime.now()
+    fecha_orden = order_data.fecha_solicitud
+
+    # Crear orden
     order = Order(
         cliente_id=order_data.cliente_id,
         producto_id=order_data.producto_id,
-        producto_nombre_snapshot=producto.nombre,  # ✅ GUARDAR SNAPSHOT
+        producto_nombre_snapshot=producto.nombre,
         cantidad=order_data.cantidad,
         prioridad="normal",
-        fecha_solicitud=order_data.fecha_solicitud
+        fecha_solicitud=fecha_orden,  # type: ignore[arg-type]
+        asignada=False,
+        cancelada=False
     )
 
     db.add(order)
     db.commit()
     db.refresh(order)
+
+    logger.info(
+        f"✅ Order #{order.id} created: {order_data.cantidad}x {producto.nombre}. "
+        f"Stock: Total={stock_total}, Reservado={producto.stock_reservado}, "
+        f"Disponible={stock_total - producto.stock_reservado}"
+    )
+
     return order
+
+
+def cancel_order(db: Session, order_id: int) -> Order:
+    """
+    Cancela una orden y LIBERA el stock reservado.
+
+    ⚠️ Solo se pueden cancelar órdenes que NO estén asignadas a una ruta.
+    """
+    order = db.query(Order).filter(Order.id == order_id).first()
+
+    if not order:
+        raise ValueError(f"Orden #{order_id} no existe")
+
+    if order.cancelada:
+        raise ValueError("La orden ya está cancelada")
+
+    if order.asignada:
+        raise ValueError(
+            "No se puede cancelar una orden asignada a una ruta. "
+            "Debes marcarla como 'no entregada' desde la ruta."
+        )
+
+    # 🔥 LIBERAR STOCK RESERVADO
+    producto = db.query(Product).filter(Product.id == order.producto_id).first()
+
+    if producto:
+        stock_reservado = producto.stock_reservado or 0
+        producto.stock_reservado = max(0, stock_reservado - order.cantidad)
+
+        logger.info(
+            f"📦 Stock liberado: {order.cantidad}x {producto.nombre}. "
+            f"Nuevo stock reservado: {producto.stock_reservado}"
+        )
+    else:
+        logger.warning(f"⚠️ Producto #{order.producto_id} no encontrado al cancelar orden")
+
+    # Marcar como cancelada
+    order.cancelada = True
+
+    db.commit()
+    db.refresh(order)
+
+    logger.info(f"❌ Orden #{order_id} cancelada exitosamente")
+    return order
+
 
 def get_order(db: Session, order_id: int) -> Order | None:
     """Obtiene una orden por su ID"""
@@ -58,55 +135,116 @@ def get_order(db: Session, order_id: int) -> Order | None:
 
 
 def update_order(db: Session, order_id: int, order_data: OrderUpdate) -> Order | None:
-    """Actualiza una orden existente."""
+    """
+    Actualiza una orden y ajusta reservas si cambia la cantidad.
+    """
     order = get_order(db, order_id)
     if not order:
         return None
 
+    # 🛡️ No permitir editar órdenes asignadas o canceladas
+    if order.asignada:
+        raise ValueError("No se puede editar una orden asignada a una ruta")
+
+    if order.cancelada:
+        raise ValueError("No se puede editar una orden cancelada")
+
+    # Si se cambia la cantidad, ajustar reserva
+    if order_data.cantidad is not None and order_data.cantidad != order.cantidad:
+        producto = db.query(Product).filter(Product.id == order.producto_id).first()
+
+        if not producto:
+            raise ValueError(f"Producto con ID {order.producto_id} no existe")
+
+        diferencia = order_data.cantidad - order.cantidad
+        stock_reservado = producto.stock_reservado or 0
+        stock_total = producto.stock_total or 0
+        stock_disponible = stock_total - stock_reservado
+
+        # Si aumenta la cantidad, validar stock
+        if diferencia > 0:
+            if stock_disponible < diferencia:
+                raise ValueError(
+                    f"Stock insuficiente. Disponible: {stock_disponible}, "
+                    f"Adicional requerido: {diferencia}"
+                )
+            producto.stock_reservado = stock_reservado + diferencia
+        else:
+            # Si disminuye, liberar stock
+            producto.stock_reservado = max(0, stock_reservado + diferencia)
+
+        order.cantidad = order_data.cantidad
+
+    # Actualizar cliente
     if order_data.cliente_id is not None:
         order.cliente_id = order_data.cliente_id
 
-    # ✅ Si se cambia el producto, actualizar snapshot
+    # Si cambia el producto
     if order_data.producto_id is not None:
-        producto = db.query(Product).filter(
+        producto_viejo = db.query(Product).filter(Product.id == order.producto_id).first()
+        producto_nuevo = db.query(Product).filter(
             Product.id == order_data.producto_id,
             Product.activo == True
         ).first()
 
-        if not producto:
+        if not producto_nuevo:
             raise ValueError(f"Producto con ID {order_data.producto_id} no existe o está inactivo")
 
+        if not producto_viejo:
+            raise ValueError(f"Producto viejo con ID {order.producto_id} no existe")
+
+        # Liberar reserva del producto viejo
+        producto_viejo.stock_reservado = max(0, (producto_viejo.stock_reservado or 0) - order.cantidad)
+
+        # Reservar en producto nuevo
+        stock_disponible_nuevo = (producto_nuevo.stock_total or 0) - (producto_nuevo.stock_reservado or 0)
+        if stock_disponible_nuevo < order.cantidad:
+            raise ValueError(
+                f"Stock insuficiente en el nuevo producto. "
+                f"Disponible: {stock_disponible_nuevo}, Requerido: {order.cantidad}"
+            )
+
+        producto_nuevo.stock_reservado = (producto_nuevo.stock_reservado or 0) + order.cantidad
+
         order.producto_id = order_data.producto_id
-        order.producto_nombre_snapshot = producto.nombre  # ✅ ACTUALIZAR SNAPSHOT
+        order.producto_nombre_snapshot = producto_nuevo.nombre
 
-    if order_data.cantidad is not None:
-        order.cantidad = order_data.cantidad
-
+    # Actualizar fecha (el validador ya convirtió a datetime si es necesario)
     if order_data.fecha_solicitud is not None:
-        if isinstance(order_data.fecha_solicitud, str):
-            parsed_date = parse_date_flexible(order_data.fecha_solicitud)
-            if parsed_date:
-                order.fecha_solicitud = parsed_date  # type: ignore[attr-defined]
-            else:
-                raise ValueError(f"Formato de fecha inválido: {order_data.fecha_solicitud}")
-        else:
-            order.fecha_solicitud = order_data.fecha_solicitud  # type: ignore[attr-defined]
+        order.fecha_solicitud = order_data.fecha_solicitud  # type: ignore[assignment]
 
     db.commit()
     db.refresh(order)
+
+    logger.info(
+        f"✅ Order #{order_id} updated. "
+        f"Producto: {order.producto_id}, Cantidad: {order.cantidad}"
+    )
+
     return order
 
-def list_orders(db: Session, skip: int = 0, limit: int = 10) -> list[Order]:
+
+def list_orders(
+    db: Session,
+    skip: int = 0,
+    limit: int = 10,
+    include_cancelled: bool = False  # 🆕 Parámetro opcional
+) -> list[Order]:
     """
-    Lista órdenes con paginación
+    Lista órdenes con paginación.
 
     Args:
-        db: Sesión de base de datos
-        skip: Número de registros a saltar (offset)
-        limit: Número máximo de registros a retornar
+        skip: Número de registros a saltar
+        limit: Número máximo de registros
+        include_cancelled: Si True, incluye órdenes canceladas
     """
+    query = db.query(Order)
+
+    if not include_cancelled:
+        query = query.filter(Order.cancelada == False)
+
     return (
-        db.query(Order)
+        query
         .order_by(Order.fecha_solicitud.desc())
         .offset(skip)
         .limit(limit)
@@ -114,9 +252,19 @@ def list_orders(db: Session, skip: int = 0, limit: int = 10) -> list[Order]:
     )
 
 
-def count_orders(db: Session) -> int:
-    """Cuenta el total de ordenes"""
-    return db.query(func.count(Order.id)).scalar()
+def count_orders(db: Session, include_cancelled: bool = False) -> int:
+    """
+    Cuenta el total de ordenes.
+
+    Args:
+        include_cancelled: Si True, incluye órdenes canceladas
+    """
+    query = db.query(func.count(Order.id))
+
+    if not include_cancelled:
+        query = query.filter(Order.cancelada == False)
+
+    return query.scalar()
 
 
 def search_customers_for_order(
@@ -128,11 +276,10 @@ def search_customers_for_order(
     Busca clientes por nombre o teléfono para usar en el selector de órdenes.
     Si query está vacío, retorna los primeros N clientes.
     """
-    # 🆕 Si no hay query, retornar los primeros clientes
     if not query or len(query.strip()) == 0:
         customers = (
             db.query(Customer)
-            .order_by(Customer.nombre)  # Ordenar alfabéticamente
+            .order_by(Customer.nombre)
             .limit(limit)
             .all()
         )
@@ -169,14 +316,13 @@ def search_products_for_order(
 ) -> List[dict]:
     """
     Busca productos por nombre para usar en el selector de órdenes.
-    Si query está vacío, retorna los primeros N productos.
+    Muestra stock disponible (stock_total - stock_reservado).
     """
-    # 🆕 Si no hay query, retornar los primeros productos
     if not query or len(query.strip()) == 0:
         products = (
             db.query(Product)
-            .filter(Product.activo == True)  # Solo productos activos
-            .order_by(Product.nombre)  # Ordenar alfabéticamente
+            .filter(Product.activo == True)
+            .order_by(Product.nombre)
             .limit(limit)
             .all()
         )
@@ -186,7 +332,7 @@ def search_products_for_order(
             db.query(Product)
             .filter(
                 Product.nombre.ilike(search_pattern),
-                Product.activo == True  # Solo productos activos
+                Product.activo == True
             )
             .order_by(Product.nombre)
             .limit(limit)
@@ -198,7 +344,9 @@ def search_products_for_order(
             "id": p.id,
             "nombre": p.nombre,
             "precio": float(p.precio) if p.precio else 0.0,
-            "stock_disponible": p.stock_total if hasattr(p, 'stock_total') else None
+            "stock_total": p.stock_total or 0,
+            "stock_reservado": p.stock_reservado or 0,
+            "stock_disponible": max(0, (p.stock_total or 0) - (p.stock_reservado or 0))  # 🔥 No negativos
         }
         for p in products
     ]
@@ -207,23 +355,13 @@ def search_orders_by_client_or_phone(
     db: Session,
     query: str,
     skip: int = 0,
-    limit: int = 10
+    limit: int = 10,
+    include_cancelled: bool = False  # 🆕 Agregar parámetro
 ) -> List[Order]:
-    """
-    Busca órdenes por nombre de cliente o número de teléfono.
-
-    Args:
-        db: Sesión de base de datos
-        query: Término de búsqueda (nombre o teléfono del cliente)
-        skip: Número de registros a saltar
-        limit: Número máximo de resultados
-
-    Returns:
-        Lista de órdenes que coinciden con la búsqueda
-    """
+    """Busca órdenes por nombre de cliente o teléfono."""
     search_pattern = f"%{query}%"
 
-    orders = (
+    query_builder = (
         db.query(Order)
         .join(Customer, Order.cliente_id == Customer.id)
         .filter(
@@ -232,6 +370,14 @@ def search_orders_by_client_or_phone(
                 Customer.telefono.ilike(search_pattern)
             )
         )
+    )
+
+    # 🆕 Solo filtrar canceladas si no se pide incluirlas
+    if not include_cancelled:
+        query_builder = query_builder.filter(Order.cancelada == False)
+
+    orders = (
+        query_builder
         .order_by(Order.fecha_solicitud.desc())
         .offset(skip)
         .limit(limit)
@@ -242,28 +388,11 @@ def search_orders_by_client_or_phone(
     return orders
 
 
-def get_orders_by_date(
-    db: Session,
-    fecha: str
-) -> List[Order]:
+def get_orders_by_date(db: Session, fecha: str) -> List[Order]:
     """
-    Obtiene órdenes NO asignadas de una fecha específica.
+    Obtiene órdenes NO asignadas y NO canceladas de una fecha específica.
     Usado para el modal de crear ruta.
-
-    Args:
-        db: Sesión de base de datos
-        fecha: Fecha en formato DD-MM-YYYY o YYYY-MM-DD (NO acepta slashes)
-
-    Returns:
-        Lista de órdenes NO asignadas de la fecha especificada
-
-    Raises:
-        ValueError: Si el formato de fecha es inválido o contiene slashes
     """
-    from sqlalchemy import cast, Date
-    from src.utils.date_parser import parse_date_flexible
-
-    # No permitir slashes en este contexto (para URLs)
     fecha_obj = parse_date_flexible(fecha, allow_slashes=False)
 
     if fecha_obj is None:
@@ -273,36 +402,25 @@ def get_orders_by_date(
 
     fecha_date = fecha_obj.date()
 
-    # Usar CAST para SQL Server (compatible con todos los DBs)
     orders = (
         db.query(Order)
         .join(Customer, Order.cliente_id == Customer.id)
         .join(Product, Order.producto_id == Product.id)
         .filter(
-            cast(Order.fecha_solicitud, Date) == fecha_date,
-            Order.asignada == False
+            cast(Order.fecha_solicitud, Date) == fecha_date, # type: ignore[arg-type]
+            Order.asignada == False,
+            Order.cancelada == False
         )
         .order_by(Order.prioridad.desc(), Order.fecha_solicitud)
         .all()
     )
 
-    logger.info(f"Found {len(orders)} unassigned orders for date {fecha_date}")
+    logger.info(f"Found {len(orders)} unassigned active orders for date {fecha_date}")
     return orders
 
 
 def count_orders_by_date(db: Session, fecha: str) -> int:
-    """
-    Cuenta órdenes de una fecha específica.
-
-    Args:
-        db: Sesión de base de datos
-        fecha: Fecha en formato DD/MM/YYYY, DD-MM-YYYY, o YYYY-MM-DD
-
-    Returns:
-        Número de órdenes en la fecha
-    """
-    from src.utils.date_parser import parse_date_flexible
-
+    """Cuenta órdenes activas de una fecha específica."""
     fecha_obj = parse_date_flexible(fecha)
     if fecha_obj is None:
         return 0
@@ -311,13 +429,16 @@ def count_orders_by_date(db: Session, fecha: str) -> int:
 
     return (
         db.query(func.count(Order.id))
-        .filter(func.date(Order.fecha_solicitud) == fecha_date)
+        .filter(
+            func.date(Order.fecha_solicitud) == fecha_date,
+            Order.cancelada == False  # 🔥 Solo activas
+        )
         .scalar()
     )
 
 
 def count_search_results(db: Session, query: str) -> int:
-    """Cuenta el total de resultados de búsqueda"""
+    """Cuenta el total de resultados de búsqueda (solo órdenes activas)"""
     search_pattern = f"%{query}%"
     return (
         db.query(func.count(Order.id))
@@ -326,7 +447,8 @@ def count_search_results(db: Session, query: str) -> int:
             or_(
                 Customer.nombre.ilike(search_pattern),
                 Customer.telefono.ilike(search_pattern)
-            )
+            ),
+            Order.cancelada == False  # 🔥 Solo activas
         )
         .scalar()
     )
@@ -336,20 +458,17 @@ def get_unassigned_orders_by_cliente(
     db: Session,
     cliente_ids: List[int]
 ) -> dict:
-    """
-    Obtiene órdenes pendientes agrupadas por cliente.
-    Útil para el modal de crear ruta.
-    """
+    """Obtiene órdenes pendientes (activas) agrupadas por cliente."""
     orders = (
         db.query(Order)
         .filter(
             Order.cliente_id.in_(cliente_ids),
-            Order.asignada == False
+            Order.asignada == False,
+            Order.cancelada == False  # 🔥 Solo activas
         )
         .all()
     )
 
-    # Agrupar por cliente
     orders_by_cliente = {}
     for order in orders:
         if order.cliente_id not in orders_by_cliente:
@@ -358,7 +477,10 @@ def get_unassigned_orders_by_cliente(
         orders_by_cliente[order.cliente_id].append({
             "orden_id": order.id,
             "producto_id": order.producto_id,
-            "producto_nombre": order.producto.nombre,
+            "producto_nombre": (
+                order.producto_nombre_snapshot  # 🔥 Prioridad al snapshot
+                or (order.producto.nombre if order.producto else "Producto eliminado")
+            ),
             "cantidad": order.cantidad,
             "prioridad": order.prioridad
         })
@@ -379,118 +501,8 @@ def mark_orders_as_assigned(
     db.commit()
 
 
-def import_orders_from_excel(
-    file,
-    db: Session,
-) -> Tuple[List[Order], List[dict], List[dict]]:
-    """
-    Importa órdenes desde un archivo Excel.
-
-    Returns:
-        Tupla con (órdenes_creadas, errores_validación, errores_db)
-    """
-    required_columns = ['cliente_id', 'producto_id', 'cantidad']
-
-    try:
-        # 1. Leer Excel
-        df = read_excel(file, required_columns=required_columns)
-        logger.info(f"Excel file read successfully. Found {len(df)} rows")
-
-        # 2. Convertir a modelos Pydantic y validar
-        items, validation_errors = convert_to_model_list(
-            df,
-            model=OrderCreate,
-            clean_data=True
-        )
-
-        if validation_errors:
-            logger.warning(f"Found {len(validation_errors)} validation errors in Excel")
-
-        # 3. Si hay errores de validación, retornar sin crear órdenes
-        if validation_errors:
-            return [], validation_errors, []
-
-        # 4. Intentar crear órdenes en la base de datos
-        created_orders = []
-        db_errors = []
-
-        for idx, item in enumerate(items):
-            row_number = idx + 2  # +2 por header y índice base 0
-
-            assert isinstance(item, OrderCreate)
-
-            try:
-                # Verificar que el cliente existe
-                customer = db.query(Customer).filter(Customer.id == item.cliente_id).first()
-                if not customer:
-                    db_errors.append({
-                        "row": row_number,
-                        "error": f"Cliente con ID {item.cliente_id} no existe",
-                        "data": {
-                            "cliente_id": item.cliente_id,
-                            "producto_id": item.producto_id,
-                            "cantidad": item.cantidad
-                        }
-                    })
-                    continue
-
-                # Verificar que el producto existe
-                product = db.query(Product).filter(Product.id == item.producto_id).first()
-                if not product:
-                    db_errors.append({
-                        "row": row_number,
-                        "error": f"Producto con ID {item.producto_id} no existe",
-                        "data": {
-                            "cliente_id": item.cliente_id,
-                            "producto_id": item.producto_id,
-                            "cantidad": item.cantidad
-                        }
-                    })
-                    continue
-
-                order = create_order(db, item)
-                created_orders.append(order)
-                logger.info(f"Order created: ID {order.id} for customer {item.cliente_id}")
-
-            except ValueError as ve:
-                db.rollback()
-                db_errors.append({
-                    "row": row_number,
-                    "error": f"Error de validación: {str(ve)}",
-                    "data": {
-                        "cliente_id": item.cliente_id,
-                        "producto_id": item.producto_id,
-                        "cantidad": item.cantidad
-                    }
-                })
-                logger.warning(f"Validation error at row {row_number}: {str(ve)}")
-
-            except Exception as e:
-                db.rollback()
-                db_errors.append({
-                    "row": row_number,
-                    "error": f"Error inesperado: {str(e)}",
-                    "data": {
-                        "cliente_id": item.cliente_id,
-                        "producto_id": item.producto_id,
-                        "cantidad": item.cantidad
-                    }
-                })
-                logger.error(f"Unexpected error creating order at row {row_number}: {str(e)}")
-
-        logger.info(f"Import completed. Created: {len(created_orders)}, DB Errors: {len(db_errors)}")
-        return created_orders, [], db_errors
-
-    except ExcelImportError as e:
-        logger.error(f"Excel import error: {str(e)}")
-        raise
-    except Exception as e:
-        logger.exception(f"Unexpected error during Excel import: {str(e)}")
-        raise Exception(f"Error procesando el archivo Excel: {str(e)}")
-
-
 def export_orders_to_excel(db: Session) -> bytes:
-    """Exporta todas las órdenes a Excel."""
+    """Exporta TODAS las órdenes (activas Y canceladas) a Excel."""
     try:
         orders = (
             db.query(Order)
@@ -506,20 +518,25 @@ def export_orders_to_excel(db: Session) -> bytes:
         else:
             data = []
             for order in orders:
-                data.append({
-                    "id": order.id,
-                    "cliente_nombre": safe_title(order.cliente.nombre),
-                    "cliente_direccion": safe_title(order.cliente.direccion),
-                    "producto_nombre": safe_title(get_product_display_name_from_order(order)),
-                    "cantidad": order.cantidad,
-                    "fecha_solicitud": parse_date_string(order.fecha_solicitud)
-                })
+                # 🔥 Formatear fecha a DD/MM/YYYY
+                if order.fecha_solicitud:
+                    # Cast to python datetime to satisfy static type checkers
+                    fecha_dt = cast(datetime, order.fecha_solicitud)
+                    fecha_str = fecha_dt.strftime("%d/%m/%Y")
+                else:
+                    fecha_str = "Sin fecha"
 
-            logger.info(f"Exporting {len(orders)} orders to Excel")
+                data.append({
+                    "Cliente": safe_title(order.cliente.nombre),
+                    "Producto": safe_title(get_product_display_name_from_order(order)),
+                    "Cantidad": order.cantidad,
+                    "Fecha Solicitud": fecha_str,
+                    "Vigencia": "Cancelada" if order.cancelada else "Activa"
+                })
 
         excel_file = export_to_excel(
             data=data,
-            filename="ordenes.xlsx",
+            filename="ordenes_completas.xlsx",
             sheet_name="Ordenes"
         )
 
@@ -531,7 +548,9 @@ def export_orders_to_excel(db: Session) -> bytes:
 
 
 def export_orders_to_pdf(db: Session) -> bytes:
-    """Exporta todas las órdenes a PDF."""
+    """
+    Exporta TODAS las órdenes (activas Y canceladas) a PDF con estadísticas.
+    """
     try:
         orders = (
             db.query(Order)
@@ -544,23 +563,49 @@ def export_orders_to_pdf(db: Session) -> bytes:
         if not orders:
             logger.warning("No orders found to export")
             data = []
+            stats = {
+                "total": 0,
+                "activas": 0,
+                "canceladas": 0,
+                "porcentaje_activas": 0,
+                "porcentaje_canceladas": 0
+            }
         else:
+            # 📊 Calcular estadísticas
+            total = len(orders)
+            canceladas = sum(1 for o in orders if o.cancelada)
+            activas = total - canceladas
+
+            stats = {
+                "total": total,
+                "activas": activas,
+                "canceladas": canceladas,
+                "porcentaje_activas": round((activas / total) * 100, 1) if total > 0 else 0,
+                "porcentaje_canceladas": round((canceladas / total) * 100, 1) if total > 0 else 0
+            }
+
             data = []
             for order in orders:
+                # 🔥 Formatear fecha a DD/MM/YYYY
+                # 🔥 Formatear fecha a DD/MM/YYYY
+                if order.fecha_solicitud:
+                    # Cast to python datetime to satisfy static type checkers
+                    fecha_dt = cast(datetime, order.fecha_solicitud)
+                    fecha_str = fecha_dt.strftime("%d/%m/%Y")
+                else:
+                    fecha_str = "Sin fecha"
+
                 data.append({
-                    "id": order.id,
                     "Cliente": safe_title(order.cliente.nombre),
-                    "Direccion": safe_title(order.cliente.direccion),
                     "Producto": safe_title(get_product_display_name_from_order(order)),
                     "Cantidad": order.cantidad,
-                    "Fecha Solicitud": parse_date_string(order.fecha_solicitud)
+                    "Fecha Solicitud": fecha_str,
+                    "Vigencia": "CANCELADA" if order.cancelada else "Activa"
                 })
+        # 🔥 Anchos de columna ajustados para 5 columnas
+        col_widths = [150.0, 150.0, 70.0, 100.0, 80.0]
 
-            logger.info(f"Exporting {len(orders)} orders to PDF")
-
-        col_widths = [40.0, 100.0, 120.0, 100.0, 60.0, 90.0]
-
-        generator = PDFReportGenerator(
+        generator = PDFReportOrder(
             title="REPORTE DE ÓRDENES",
             page_size=letter,
             author="Sistema",
@@ -568,9 +613,10 @@ def export_orders_to_pdf(db: Session) -> bytes:
         )
 
         pdf_bytes = generator.generate(
-            headers=["ID", "Cliente", "Direccion", "Producto", "Cantidad", "Fecha Solicitud"],
+            headers=["Cliente", "Producto", "Cantidad", "Fecha Solicitud", "Vigencia"],
             data=data,
-            col_widths=col_widths
+            col_widths=col_widths,
+            stats=stats
         )
 
         return pdf_bytes

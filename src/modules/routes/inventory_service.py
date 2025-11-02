@@ -29,16 +29,7 @@ def reserve_stock_for_route(
     inventario_dict: Dict[int, int]
 ) -> None:
     """
-    🔥 NUEVA VERSIÓN: Descuenta stock AL CREAR LA RUTA (no al iniciarla).
-
-    Args:
-        db: Sesión de base de datos
-        ruta_id: ID de la ruta
-        almacen_id: ID del almacén
-        inventario_dict: {producto_id: cantidad_total}
-
-    Raises:
-        InsufficientStockError: Si no hay stock suficiente
+    Descuenta stock AL CREAR LA RUTA y libera las reservas de órdenes.
     """
     productos_faltantes: List[Dict[str, Any]] = []
 
@@ -49,8 +40,9 @@ def reserve_stock_for_route(
             raise ValueError(f"Producto {producto_id} no existe")
 
         stock_actual = int(producto.stock_total) if producto.stock_total is not None else 0
+        stock_reservado = int(producto.stock_reservado) if producto.stock_reservado is not None else 0
 
-        # Validar stock
+        # Validar stock total
         if stock_actual < cantidad_necesaria:
             productos_faltantes.append({
                 "producto_id": int(producto_id),
@@ -60,15 +52,19 @@ def reserve_stock_for_route(
             })
             continue
 
-        # 🔥 DESCONTAR del stock total
+        # 🔥 DESCONTAR del stock_total
         producto.stock_total = stock_actual - cantidad_necesaria
 
-        # 🔥 CREAR registro en inventario_ruta con cantidad_final inicializada
+        # 🔥 LIBERAR de stock_reservado (porque ya se asignó físicamente)
+        cantidad_a_liberar = min(stock_reservado, cantidad_necesaria)
+        producto.stock_reservado = stock_reservado - cantidad_a_liberar
+
+        # Crear registro en inventario_ruta
         inventario = RouteInventory(
             ruta_id=ruta_id,
             producto_id=producto_id,
             cantidad_inicial=cantidad_necesaria,
-            cantidad_final=cantidad_necesaria  # 🔥 INICIALIZAR AQUÍ
+            cantidad_final=cantidad_necesaria
         )
         db.add(inventario)
 
@@ -80,11 +76,9 @@ def reserve_stock_for_route(
 
     db.commit()
     logger.info(
-        f"Stock reserved for route {ruta_id} from warehouse {almacen_id}. "
-        f"Total products: {len(inventario_dict)}"
+        f"Stock reserved for route {ruta_id}. "
+        f"Reservations released for assigned orders."
     )
-
-
 def update_inventory_after_delivery(
     db: Session,
     ruta_id: int,

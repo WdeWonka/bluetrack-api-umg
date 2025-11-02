@@ -15,7 +15,8 @@ from src.modules.orders.service import (
     search_orders_by_client_or_phone,
     get_orders_by_date,
     export_orders_to_excel,
-    export_orders_to_pdf
+    export_orders_to_pdf,
+    cancel_order
 )
 from src.utils.date_parser import format_datetime_for_display
 from db.deps import get_db
@@ -23,7 +24,6 @@ from src.utils.http_response import HttpResponse
 from src.modules.auth.dependencies import require_role
 from src.common.constants.roles import ADMIN, OPERATOR
 
-# ✅ CORRECCIÓN: Sin corchetes alrededor de ADMIN, OPERATOR
 router = APIRouter(
     prefix="/orders",
     tags=["orders"],
@@ -33,29 +33,15 @@ router = APIRouter(
 logger = logging.getLogger(__name__)
 
 
-@router.post(
-    "/",
-    summary="Crear orden individual",
-    response_description="Orden creada exitosamente"
-)
+
+@router.post("/", summary="Crear orden individual")
 def api_create_order(
     order_data: OrderCreate,
     db: Session = Depends(get_db)
 ):
     """
-    Crea una orden individual de cliente.
-
-    **Campos requeridos:**
-    - cliente_id: ID del cliente que hace el pedido
-    - producto_id: ID del producto solicitado
-    - cantidad: Cantidad solicitada (> 0)
-
-    **Campos opcionales:**
-    - fecha_solicitud: Fecha en formato DD/MM/YYYY, DD-MM-YYYY o YYYY-MM-DD (default: hoy)
-
-    **La orden se crea con:**
-    - asignada=False (sin ruta asignada)
-    - fecha_solicitud automática si no se proporciona
+    Crea una orden individual de cliente y RESERVA el stock.
+    **Formato de fecha:** DD/MM/YYYY
     """
     try:
         order = create_order(db, order_data)
@@ -69,28 +55,14 @@ def api_create_order(
                 "cantidad": order.cantidad,
                 "prioridad": order.prioridad,
                 "asignada": order.asignada,
-                "fecha_solicitud": format_datetime_for_display(order.fecha_solicitud)
+                "cancelada": order.cancelada,
+                "fecha_solicitud": format_datetime_for_display(order.fecha_solicitud)  # 🔥 DD/MM/YYYY
             }
         )
 
     except ValueError as e:
         logger.warning(f"Validation error creating order: {str(e)}")
         return HttpResponse.bad_request(error=str(e))
-
-    except IntegrityError as ie:
-        db.rollback()
-        logger.error(f"Integrity error creating order: {str(ie)}")
-        return HttpResponse.conflict(
-            error="El cliente o producto no existe en la base de datos"
-        )
-
-    except SQLAlchemyError as se:
-        db.rollback()
-        logger.error(f"Database error creating order: {str(se)}")
-        return HttpResponse.internal_server_error(
-            error="Error de base de datos al crear la orden"
-        )
-
     except Exception as e:
         db.rollback()
         logger.exception(f"Unexpected error creating order: {str(e)}")
@@ -104,7 +76,7 @@ def api_create_order(
     summary="Buscar clientes para crear orden"
 )
 def api_search_customers_for_order(
-    q: str = Query("", min_length=0),  # 🆕 Cambiado: ahora es opcional con default=""
+    q: str = Query("", min_length=0),
     limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db)
 ):
@@ -128,13 +100,18 @@ def api_search_customers_for_order(
     summary="Buscar productos para crear orden"
 )
 def api_search_products_for_order(
-    q: str = Query("", min_length=0),  # 🆕 Cambiado: ahora es opcional con default=""
+    q: str = Query("", min_length=0),
     limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db)
 ):
     """
     Busca productos por nombre.
     Si no se proporciona query, retorna los primeros productos ordenados alfabéticamente.
+
+    **Retorna:**
+    - stock_total: Inventario físico total
+    - stock_reservado: Stock comprometido en órdenes pendientes
+    - stock_disponible: stock_total - stock_reservado
     """
     try:
         products = search_products_for_order(db, q, limit)
@@ -145,19 +122,25 @@ def api_search_products_for_order(
     except Exception as e:
         logger.exception(f"Error searching products: {str(e)}")
         return HttpResponse.internal_server_error(error="Error al buscar productos")
-@router.get(
-    "/search",
-    summary="Buscar órdenes por cliente"
-)
+
+
+
+@router.get("/search", summary="Buscar órdenes por cliente")
 def api_search_orders(
     q: str = Query(..., min_length=1),
     skip: int = Query(0, ge=0),
     limit: int = Query(10, ge=1, le=100),
+    include_cancelled: bool = Query(False, description="Incluir órdenes canceladas"),
     db: Session = Depends(get_db)
 ):
-    """Busca órdenes por nombre de cliente o teléfono."""
+    """
+    Busca órdenes por nombre de cliente o teléfono.
+    **Formato de fecha:** DD/MM/YYYY
+    """
     try:
-        orders = search_orders_by_client_or_phone(db, q, skip, limit)
+        orders = search_orders_by_client_or_phone(
+            db, q, skip, limit, include_cancelled
+        )
         return HttpResponse.success(
             message=f"Se encontraron {len(orders)} órdenes",
             response={
@@ -171,7 +154,8 @@ def api_search_orders(
                         "cantidad": o.cantidad,
                         "prioridad": o.prioridad,
                         "asignada": o.asignada,
-                        "fecha_solicitud": format_datetime_for_display(o.fecha_solicitud)
+                        "cancelada": o.cancelada,
+                        "fecha_solicitud": format_datetime_for_display(o.fecha_solicitud)  # 🔥 DD/MM/YYYY
                     }
                     for o in orders
                 ]
@@ -191,7 +175,7 @@ def api_get_orders_by_date(
     db: Session = Depends(get_db)
 ):
     """
-    Obtiene SOLO órdenes NO asignadas de una fecha específica.
+    Obtiene SOLO órdenes NO asignadas y NO canceladas de una fecha específica.
 
     **Uso:** Modal de crear ruta
     - Operador selecciona fecha de salida
@@ -257,20 +241,35 @@ def api_get_orders_by_date(
         logger.exception(f"Error getting orders for date {fecha}")
         return HttpResponse.internal_server_error(error="Error al obtener órdenes")
 
+# router.py - Actualizar descripciones de endpoints
 
 @router.get(
     "/export/excel",
-    summary="Exportar órdenes a Excel"
+    summary="Exportar todas las órdenes a Excel"
 )
 def api_export_orders_excel(db: Session = Depends(get_db)):
-    """Exporta todas las órdenes a Excel."""
+    """
+    Exporta TODAS las órdenes (activas Y canceladas) a Excel.
+
+    **Columnas incluidas:**
+    - ID
+    - Cliente
+    - Dirección
+    - Producto
+    - Cantidad
+    - Fecha Solicitud
+    - Asignada (Sí/No)
+    - Vigencia (Activa/Cancelada) ← Nueva columna
+
+    **Nota:** Este endpoint exporta todas las órdenes sin filtros.
+    """
     try:
         excel_content = export_orders_to_excel(db)
-        logger.info("Orders exported to Excel successfully")
+        logger.info("All orders (active + cancelled) exported to Excel successfully")
         return Response(
             content=excel_content,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": "attachment; filename=ordenes.xlsx"}
+            headers={"Content-Disposition": "attachment; filename=ordenes_completas.xlsx"}
         )
     except Exception as e:
         logger.exception("Error exporting to Excel")
@@ -279,33 +278,57 @@ def api_export_orders_excel(db: Session = Depends(get_db)):
 
 @router.get(
     "/export/pdf",
-    summary="Exportar órdenes a PDF"
+    summary="Exportar todas las órdenes a PDF con estadísticas"
 )
 def api_export_orders_pdf(db: Session = Depends(get_db)):
-    """Exporta todas las órdenes a PDF."""
+    """
+    Exporta TODAS las órdenes (activas Y canceladas) a PDF con resumen estadístico.
+
+    **Incluye:**
+    - 📊 Resumen estadístico visual:
+      - Total de órdenes
+      - Órdenes activas (cantidad y porcentaje)
+      - Órdenes canceladas (cantidad y porcentaje)
+
+    - 📋 Tabla completa con todas las órdenes:
+      - ID
+      - Cliente
+      - Dirección
+      - Producto
+      - Cantidad
+      - Fecha Solicitud
+      - Vigencia (resaltada en rojo si está cancelada)
+
+    **Diseño:** Las órdenes canceladas se muestran en rojo para fácil identificación.
+    """
     try:
         pdf_content = export_orders_to_pdf(db)
-        logger.info("Orders exported to PDF successfully")
+        logger.info("All orders (active + cancelled) exported to PDF with stats successfully")
         return Response(
             content=pdf_content,
             media_type="application/pdf",
-            headers={"Content-Disposition": "attachment; filename=ordenes.pdf"}
+            headers={"Content-Disposition": "attachment; filename=ordenes_completas.pdf"}
         )
     except Exception as e:
         logger.exception("Error exporting to PDF")
         return HttpResponse.internal_server_error(error="Error al exportar a PDF")
 
 
+
 @router.get("/", summary="Listar todas las órdenes")
 def api_list_orders(
     db: Session = Depends(get_db),
     page: int = Query(1, ge=1),
-    per_page: int = Query(10, ge=1, le=100)
+    per_page: int = Query(10, ge=1, le=100),
+    include_cancelled: bool = Query(False, description="Incluir órdenes canceladas")
 ):
-    """Lista órdenes con paginación."""
+    """
+    Lista órdenes con paginación.
+    **Formato de fecha:** DD/MM/YYYY
+    """
     try:
         skip = (page - 1) * per_page
-        orders = list_orders(db, skip=skip, limit=per_page)
+        orders = list_orders(db, skip=skip, limit=per_page, include_cancelled=include_cancelled)
 
         if not orders:
             return HttpResponse.success(
@@ -323,7 +346,7 @@ def api_list_orders(
                 }
             )
 
-        total_orders = count_orders(db)
+        total_orders = count_orders(db, include_cancelled=include_cancelled)
         total_pages = (total_orders + per_page - 1) // per_page
 
         return HttpResponse.success(
@@ -334,7 +357,6 @@ def api_list_orders(
                         "id": order.id,
                         "cliente_id": order.cliente_id,
                         "cliente_nombre": order.cliente.nombre if order.cliente else None,
-                        # ✅ USAR SNAPSHOT: Prioridad al snapshot, fallback a relación
                         "producto_nombre": (
                             order.producto_nombre_snapshot
                             or (order.producto.nombre if order.producto else "Producto no disponible")
@@ -342,7 +364,8 @@ def api_list_orders(
                         "cantidad": order.cantidad,
                         "prioridad": order.prioridad,
                         "asignada": order.asignada,
-                        "fecha_solicitud": format_datetime_for_display(order.fecha_solicitud)
+                        "cancelada": order.cancelada,
+                        "fecha_solicitud": format_datetime_for_display(order.fecha_solicitud)  # 🔥 DD/MM/YYYY
                     }
                     for order in orders
                 ],
@@ -361,15 +384,16 @@ def api_list_orders(
         return HttpResponse.internal_server_error(error="Error al listar órdenes")
 
 
-@router.get(
-    "/{order_id}",
-    summary="Obtener orden por ID"
-)
+
+@router.get("/{order_id}", summary="Obtener orden por ID")
 def api_get_order(
     order_id: int,
     db: Session = Depends(get_db)
 ):
-    """Obtiene una orden específica por ID."""
+    """
+    Obtiene una orden específica por ID.
+    **Formato de fecha:** DD/MM/YYYY
+    """
     try:
         order = get_order(db, order_id)
         if not order:
@@ -381,12 +405,14 @@ def api_get_order(
                 "id": order.id,
                 "cliente_id": order.cliente_id,
                 "cliente_nombre": order.cliente.nombre if order.cliente else None,
+                "producto_id": order.producto_id,
                 "producto_nombre": get_product_display_name_from_order(order),
                 "cantidad": order.cantidad,
                 "prioridad": order.prioridad,
                 "asignada": order.asignada,
+                "cancelada": order.cancelada,
                 "ruta_id": order.ruta_id,
-                "fecha_solicitud": format_datetime_for_display(order.fecha_solicitud)
+                "fecha_solicitud": format_datetime_for_display(order.fecha_solicitud)  # 🔥 DD/MM/YYYY
             }
         )
     except Exception as e:
@@ -394,25 +420,20 @@ def api_get_order(
         return HttpResponse.internal_server_error(error="Error al obtener la orden")
 
 
-@router.patch(
-    "/{order_id}",
-    summary="Actualizar orden"
-)
+@router.patch("/{order_id}", summary="Actualizar orden")
 def api_update_order(
     order_id: int,
     order_data: OrderUpdate,
     db: Session = Depends(get_db)
 ):
-    """Actualiza una orden existente."""
+    """
+    Actualiza una orden existente.
+    **Formato de fecha:** DD/MM/YYYY
+    """
     try:
         existing_order = get_order(db, order_id)
         if not existing_order:
             return HttpResponse.not_found(error=f"Orden con ID {order_id} no existe")
-
-        if existing_order.asignada:
-            return HttpResponse.bad_request(
-                error="No se puede editar una orden asignada a una ruta"
-            )
 
         updated_order = update_order(db, order_id, order_data)
         if not updated_order:
@@ -423,15 +444,98 @@ def api_update_order(
                 "id": updated_order.id,
                 "cliente_id": updated_order.cliente_id,
                 "producto_id": updated_order.producto_id,
+                "producto_nombre": get_product_display_name_from_order(updated_order),
                 "cantidad": updated_order.cantidad,
                 "prioridad": updated_order.prioridad,
-                "fecha_solicitud": format_datetime_for_display(updated_order.fecha_solicitud)
+                "asignada": updated_order.asignada,
+                "cancelada": updated_order.cancelada,
+                "fecha_solicitud": format_datetime_for_display(updated_order.fecha_solicitud)  # 🔥 DD/MM/YYYY
             }
         )
-    except IntegrityError:
-        db.rollback()
-        return HttpResponse.conflict(error="El cliente o producto no existe")
+
+    except ValueError as e:
+        logger.warning(f"Validation error updating order {order_id}: {str(e)}")
+        return HttpResponse.bad_request(error=str(e))
     except Exception as e:
         db.rollback()
         logger.exception(f"Error updating order {order_id}")
-        return HttpResponse.internal_server_error(error="Error al actualizar")
+        return HttpResponse.internal_server_error(error="Error al actualizar la orden")
+
+@router.delete(
+    "/{order_id}/cancel",
+    summary="Cancelar orden"
+)
+def api_cancel_order(
+    order_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Cancela una orden y LIBERA el stock reservado.
+
+    **Solo se pueden cancelar órdenes:**
+    - ✅ NO asignadas a rutas
+    - ✅ NO canceladas previamente
+
+    **¿Qué pasa con el stock?**
+    - El stock_reservado se LIBERA automáticamente
+    - El stock vuelve a estar disponible para nuevas órdenes
+    - El stock_total NO se modifica (nunca se descontó)
+
+    **Ejemplo de flujo:**
+    ```
+    ANTES DE CANCELAR:
+    stock_total = 500
+    stock_reservado = 100 (de esta orden)
+    stock_disponible = 400
+
+    DESPUÉS DE CANCELAR:
+    stock_total = 500 (sin cambios)
+    stock_reservado = 0 (liberado)
+    stock_disponible = 500 (disponible de nuevo)
+    ```
+
+    **Si la orden está en una ruta:**
+    - No se puede cancelar desde aquí
+    - Debe marcarse como "no entregada" desde la ruta
+    - El stock se devolverá al finalizar la ruta
+    """
+    try:
+        # Obtener orden para mostrar info en respuesta
+        order_before = get_order(db, order_id)
+        if not order_before:
+            return HttpResponse.not_found(error=f"Orden con ID {order_id} no existe")
+
+        # Guardar info del producto para la respuesta
+        producto_nombre = get_product_display_name_from_order(order_before)
+        cantidad_liberada = order_before.cantidad
+
+        # Cancelar orden
+        order = cancel_order(db, order_id)
+
+        logger.info(
+            f"✅ Order #{order_id} cancelled successfully. "
+            f"Released {cantidad_liberada} units of {producto_nombre}"
+        )
+
+        return HttpResponse.success(
+            message=f"Orden #{order_id} cancelada exitosamente. "
+                   f"Se liberaron {cantidad_liberada} unidades de {producto_nombre}.",
+            response={
+                "id": order.id,
+                "cancelada": order.cancelada,
+                "cliente_id": order.cliente_id,
+                "producto_nombre": producto_nombre,
+                "cantidad_liberada": cantidad_liberada
+            }
+        )
+
+    except ValueError as e:
+        logger.warning(f"Cannot cancel order {order_id}: {str(e)}")
+        return HttpResponse.bad_request(error=str(e))
+
+    except Exception as e:
+        db.rollback()
+        logger.exception(f"Error cancelling order {order_id}")
+        return HttpResponse.internal_server_error(error="Error al cancelar la orden")
+
+
