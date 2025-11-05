@@ -2,13 +2,14 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, or_, cast, Date
 from typing import List, Optional, Tuple, cast
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from src.models.orders import Order
 from src.models.customer import Customer
 from src.models.product import Product
 from src.modules.orders.type import OrderCreate, OrderUpdate
 from src.utils.pdf_generator import PDFReportOrder
 from reportlab.lib.pagesizes import letter
+from src.models.delivery import Delivery
 from src.utils.product_helpers import get_product_display_name_from_order
 from src.utils.type_converters import safe_title
 from src.utils.date_parser import parse_date_flexible, parse_date_string
@@ -20,6 +21,33 @@ from src.utils.excel_formatter import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+
+def validate_future_date(fecha: datetime) -> None:
+    """
+    Valida que la fecha sea al menos 1 día posterior a hoy.
+
+    Args:
+        fecha: Fecha a validar
+
+    Raises:
+        ValueError: Si la fecha no es futura
+    """
+    hoy = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    fecha_minima = hoy + timedelta(days=1)
+
+    # Convertir fecha a datetime si es necesario y resetear hora
+    if isinstance(fecha, date) and not isinstance(fecha, datetime):
+        fecha = datetime.combine(fecha, datetime.min.time())
+    else:
+        fecha = fecha.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if fecha < fecha_minima:
+        raise ValueError(
+            f"La fecha de entrega debe ser al menos 1 día posterior a hoy. "
+            f"Fecha mínima permitida: {fecha_minima.strftime('%d/%m/%Y')}"
+        )
 
 def create_order(db: Session, order_data: OrderCreate) -> Order:
     """
@@ -41,6 +69,10 @@ def create_order(db: Session, order_data: OrderCreate) -> Order:
     if not cliente:
         raise ValueError(f"Cliente con ID {order_data.cliente_id} no existe")
 
+    # 🔥 VALIDAR QUE LA FECHA SEA FUTURA
+    fecha_orden = order_data.fecha_solicitud
+    validate_future_date(fecha_orden)
+
     # 🔥 VALIDAR STOCK DISPONIBLE (stock_total - stock_reservado)
     stock_total = producto.stock_total or 0
     stock_reservado = producto.stock_reservado or 0
@@ -55,10 +87,6 @@ def create_order(db: Session, order_data: OrderCreate) -> Order:
 
     # 🔥 RESERVAR STOCK (NO descontar de stock_total todavía)
     producto.stock_reservado = stock_reservado + order_data.cantidad
-
-    # 🔧 El validador de Pydantic ya convirtió fecha_solicitud a datetime
-    # Si no se proporcionó, ya tiene datetime.now()
-    fecha_orden = order_data.fecha_solicitud
 
     # Crear orden
     order = Order(
@@ -76,15 +104,8 @@ def create_order(db: Session, order_data: OrderCreate) -> Order:
     db.commit()
     db.refresh(order)
 
-    logger.info(
-        f"✅ Order #{order.id} created: {order_data.cantidad}x {producto.nombre}. "
-        f"Stock: Total={stock_total}, Reservado={producto.stock_reservado}, "
-        f"Disponible={stock_total - producto.stock_reservado}"
-    )
 
     return order
-
-
 def cancel_order(db: Session, order_id: int) -> Order:
     """
     Cancela una orden y LIBERA el stock reservado.
@@ -142,12 +163,17 @@ def update_order(db: Session, order_id: int, order_data: OrderUpdate) -> Order |
     if not order:
         return None
 
-    # 🛡️ No permitir editar órdenes asignadas o canceladas
+    #  No permitir editar órdenes asignadas o canceladas
     if order.asignada:
         raise ValueError("No se puede editar una orden asignada a una ruta")
 
     if order.cancelada:
         raise ValueError("No se puede editar una orden cancelada")
+
+    # VALIDAR FECHA SI SE ESTÁ ACTUALIZANDO
+    if order_data.fecha_solicitud is not None:
+        validate_future_date(order_data.fecha_solicitud)
+        order.fecha_solicitud = order_data.fecha_solicitud  # type: ignore[assignment]
 
     # Si se cambia la cantidad, ajustar reserva
     if order_data.cantidad is not None and order_data.cantidad != order.cantidad:
@@ -209,26 +235,18 @@ def update_order(db: Session, order_id: int, order_data: OrderUpdate) -> Order |
         order.producto_id = order_data.producto_id
         order.producto_nombre_snapshot = producto_nuevo.nombre
 
-    # Actualizar fecha (el validador ya convirtió a datetime si es necesario)
-    if order_data.fecha_solicitud is not None:
-        order.fecha_solicitud = order_data.fecha_solicitud  # type: ignore[assignment]
-
     db.commit()
     db.refresh(order)
 
-    logger.info(
-        f"✅ Order #{order_id} updated. "
-        f"Producto: {order.producto_id}, Cantidad: {order.cantidad}"
-    )
+
 
     return order
-
 
 def list_orders(
     db: Session,
     skip: int = 0,
     limit: int = 10,
-    include_cancelled: bool = False  # 🆕 Parámetro opcional
+    include_cancelled: bool = False
 ) -> list[Order]:
     """
     Lista órdenes con paginación.
@@ -346,7 +364,7 @@ def search_products_for_order(
             "precio": float(p.precio) if p.precio else 0.0,
             "stock_total": p.stock_total or 0,
             "stock_reservado": p.stock_reservado or 0,
-            "stock_disponible": max(0, (p.stock_total or 0) - (p.stock_reservado or 0))  # 🔥 No negativos
+            "stock_disponible": max(0, (p.stock_total or 0) - (p.stock_reservado or 0))
         }
         for p in products
     ]
@@ -356,7 +374,7 @@ def search_orders_by_client_or_phone(
     query: str,
     skip: int = 0,
     limit: int = 10,
-    include_cancelled: bool = False  # 🆕 Agregar parámetro
+    include_cancelled: bool = False
 ) -> List[Order]:
     """Busca órdenes por nombre de cliente o teléfono."""
     search_pattern = f"%{query}%"
@@ -372,7 +390,7 @@ def search_orders_by_client_or_phone(
         )
     )
 
-    # 🆕 Solo filtrar canceladas si no se pide incluirlas
+    # Solo filtrar canceladas si no se pide incluirlas
     if not include_cancelled:
         query_builder = query_builder.filter(Order.cancelada == False)
 
@@ -431,7 +449,7 @@ def count_orders_by_date(db: Session, fecha: str) -> int:
         db.query(func.count(Order.id))
         .filter(
             func.date(Order.fecha_solicitud) == fecha_date,
-            Order.cancelada == False  # 🔥 Solo activas
+            Order.cancelada == False
         )
         .scalar()
     )
@@ -448,7 +466,7 @@ def count_search_results(db: Session, query: str) -> int:
                 Customer.nombre.ilike(search_pattern),
                 Customer.telefono.ilike(search_pattern)
             ),
-            Order.cancelada == False  # 🔥 Solo activas
+            Order.cancelada == False
         )
         .scalar()
     )
@@ -464,7 +482,7 @@ def get_unassigned_orders_by_cliente(
         .filter(
             Order.cliente_id.in_(cliente_ids),
             Order.asignada == False,
-            Order.cancelada == False  # 🔥 Solo activas
+            Order.cancelada == False
         )
         .all()
     )

@@ -12,6 +12,7 @@ class EstadoRuta(str, Enum):
     PENDIENTE = "pendiente"
     EN_PROCESO = "en_proceso"
     COMPLETADA = "completada"
+    CANCELADA = "cancelada"
 
 
 class EstadoEntrega(str, Enum):

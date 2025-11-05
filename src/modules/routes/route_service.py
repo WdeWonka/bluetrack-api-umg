@@ -1,5 +1,5 @@
 """
-Servicio de rutas (CORREGIDO FINAL).
+Servicio de rutas (COMPLETO - ACTUALIZADO).
 """
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, cast, Date
@@ -27,8 +27,9 @@ logger = logging.getLogger(__name__)
 
 def create_route(db: Session, route_data: RouteCreate) -> Route:
     """
-    Crea una ruta automáticamente con TODAS las órdenes de una fecha específica.
+    Crea una ruta automáticamente con TODAS las órdenes ACTIVAS de una fecha específica.
     🔥 NUEVO: Descuenta stock AL CREAR (no al iniciar).
+    🔥 ACTUALIZADO: Solo toma órdenes NO canceladas.
     """
     from src.models.user import User
 
@@ -46,19 +47,20 @@ def create_route(db: Session, route_data: RouteCreate) -> Route:
     if not vendedor.activo:
         raise ValueError(f"El vendedor {vendedor.nombre} está inactivo")
 
-    # 2. Buscar órdenes
+    # 2. Buscar órdenes ACTIVAS (NO canceladas)
     ordenes = (
         db.query(Order)
         .filter(
             cast(Order.fecha_solicitud, Date) == route_data.fecha,
-            Order.asignada == False
+            Order.asignada == False,
+            Order.cancelada == False  # 🔥 Solo órdenes activas
         )
         .all()
     )
 
     if not ordenes:
         raise ValueError(
-            f"No hay órdenes pendientes para la fecha {route_data.fecha}"
+            f"No hay órdenes activas pendientes para la fecha {route_data.fecha}"
         )
 
     if route_data.fecha < date.today():
@@ -119,7 +121,7 @@ def create_route(db: Session, route_data: RouteCreate) -> Route:
 
     logger.info(
         f"Route created: {route.nombre} with "
-        f"{len(ordenes_por_cliente)} clients and {len(ordenes)} orders. "
+        f"{len(ordenes_por_cliente)} clients and {len(ordenes)} active orders. "
         f"Stock reserved."
     )
     return route
@@ -352,10 +354,18 @@ def get_route_with_current_cliente(db: Session, route_id: int) -> dict:
     }
 
 
-def list_routes(db: Session, skip: int = 0, limit: int = 10) -> list[Route]:
+def list_routes(db: Session, skip: int = 0, limit: int = 10, vendedor_id: Optional[int] = None, estado: Optional[EstadoRuta] = None) -> list[Route]:
     """Lista rutas con paginación."""
+    query = db.query(Route)
+
+    if vendedor_id:
+        query = query.filter(Route.vendedor_id == vendedor_id)
+
+    if estado:
+        query = query.filter(Route.estado == estado)
+
     return (
-        db.query(Route)
+        query
         .order_by(Route.fecha.desc(), Route.id.desc())
         .offset(skip)
         .limit(limit)
@@ -381,15 +391,9 @@ def count_routes(
 
 
 def export_routes_to_excel(db: Session) -> bytes:
-    """
-    Exporta todas las rutas a Excel.
-
-    Returns:
-        bytes: Contenido del archivo Excel
-    """
+    """Exporta todas las rutas a Excel."""
     from src.utils.excel_formatter import export_to_excel
     from src.utils.type_converters import safe_title
-    from src.utils.date_parser import parse_date_string
 
     try:
         routes = (
@@ -405,7 +409,6 @@ def export_routes_to_excel(db: Session) -> bytes:
         else:
             data = []
             for route in routes:
-                # Calcular totales
                 total_clientes = len(route.detalles)
                 clientes_entregados = sum(
                     1 for d in route.detalles
@@ -419,7 +422,6 @@ def export_routes_to_excel(db: Session) -> bytes:
                     "estado": route.estado.capitalize(),
                     "total_clientes": total_clientes,
                     "clientes_entregados": clientes_entregados,
-
                 })
 
             logger.info(f"Exporting {len(routes)} routes to Excel")
@@ -438,15 +440,9 @@ def export_routes_to_excel(db: Session) -> bytes:
 
 
 def export_routes_to_pdf(db: Session) -> bytes:
-    """
-    Exporta todas las rutas a PDF.
-
-    Returns:
-        bytes: Contenido del archivo PDF
-    """
+    """Exporta todas las rutas a PDF."""
     from src.utils.pdf_exporter import PDFReportGenerator
     from src.utils.type_converters import safe_title
-    from src.utils.date_parser import parse_date_string
 
     try:
         routes = (
@@ -462,7 +458,6 @@ def export_routes_to_pdf(db: Session) -> bytes:
         else:
             data = []
             for route in routes:
-                # Calcular totales
                 total_clientes = len(route.detalles)
                 clientes_entregados = sum(
                     1 for d in route.detalles
@@ -479,8 +474,7 @@ def export_routes_to_pdf(db: Session) -> bytes:
 
             logger.info(f"Exporting {len(routes)} routes to PDF")
 
-        # Anchos personalizados para las columnas
-        col_widths = [ 120.0, 120.0, 80.0, 100.0, 70.0]
+        col_widths = [120.0, 120.0, 80.0, 100.0, 70.0]
 
         generator = PDFReportGenerator(
             title="REPORTE DE RUTAS",
@@ -490,15 +484,7 @@ def export_routes_to_pdf(db: Session) -> bytes:
         )
 
         pdf_bytes = generator.generate(
-            headers=[
-
-                "Nombre",
-                "Vendedor",
-                "Estado",
-                "Clientes totales",
-                "Entregados",
-
-            ],
+            headers=["Nombre", "Vendedor", "Estado", "Clientes totales", "Entregados"],
             data=data,
             col_widths=col_widths
         )
@@ -508,3 +494,108 @@ def export_routes_to_pdf(db: Session) -> bytes:
     except Exception as e:
         logger.exception(f"Error exporting routes to PDF: {str(e)}")
         raise Exception(f"Error al exportar rutas a PDF: {str(e)}")
+
+
+def cancel_route(db: Session, route_id: int, motivo: str) -> Dict[str, Any]:
+    """
+    Cancela una ruta en estado PENDIENTE y devuelve el stock al almacén.
+    """
+    from src.models.product import Product
+
+    # Validar motivo
+    if not motivo or len(motivo.strip()) == 0:
+        raise ValueError("Debe proporcionar un motivo para cancelar la ruta")
+
+    # Obtener ruta
+    route = db.query(Route).filter(Route.id == route_id).first()
+
+    if not route:
+        raise ValueError(f"Ruta {route_id} no existe")
+
+    # Solo se pueden cancelar rutas pendientes
+    if route.estado != 'pendiente':  # 🔥 Comparar con string directo
+        raise ValueError(
+            f"Solo se pueden cancelar rutas en estado PENDIENTE. "
+            f"Estado actual: {route.estado}"
+        )
+
+    # 1. Obtener inventario de la ruta
+    inventario_items = (
+        db.query(RouteInventory)
+        .filter(RouteInventory.ruta_id == route_id)
+        .all()
+    )
+
+    productos_devueltos = []
+    total_devuelto = 0
+
+    # 2. Devolver stock al almacén
+    for item in inventario_items:
+        producto = db.query(Product).filter(
+            Product.id == item.producto_id
+        ).first()
+
+        if producto:
+            cantidad_a_devolver = int(item.cantidad_inicial)
+
+            # Devolver a stock_total
+            current_stock = int(producto.stock_total) if producto.stock_total else 0
+            producto.stock_total = current_stock + cantidad_a_devolver
+
+            total_devuelto += cantidad_a_devolver
+            productos_devueltos.append({
+                "producto_id": item.producto_id,
+                "nombre": producto.nombre,
+                "cantidad_devuelta": cantidad_a_devolver
+            })
+
+    # 3. Liberar órdenes asignadas
+    ordenes = db.query(Order).filter(Order.ruta_id == route_id).all()
+    ordenes_liberadas = 0
+
+    for orden in ordenes:
+        orden.asignada = False
+        orden.ruta_id = None
+        ordenes_liberadas += 1
+
+    # 4. 🔥 Marcar ruta como cancelada
+    timestamp_cancelacion = datetime.now()
+
+    # 🔥 CRÍTICO: Usar string literal, no enum
+    route.estado = 'cancelada'
+    route.cancelada_en = timestamp_cancelacion
+    route.motivo_cancelacion = motivo.strip()
+
+    # 🔥 CRÍTICO: Flush antes de commit para detectar errores temprano
+    try:
+        db.flush()
+        logger.info(f"✅ Route {route_id} flushed successfully with estado='{route.estado}'")
+    except Exception as e:
+        logger.error(f"❌ Error during flush: {str(e)}")
+        logger.error(f"❌ Estado value: '{route.estado}' (type: {type(route.estado)})")
+        db.rollback()
+        raise
+
+    db.commit()
+    db.refresh(route)
+
+    logger.info(
+        f"Route {route_id} cancelled. "
+        f"Reason: {motivo}. "
+        f"Stock returned: {total_devuelto} units. "
+        f"Orders released: {ordenes_liberadas}"
+    )
+
+    return {
+        "route": route,
+        "motivo": motivo.strip(),
+        "cancelada_en": timestamp_cancelacion.isoformat(),
+        "stock_devuelto": {
+            "total_productos": len(productos_devueltos),
+            "total_unidades": total_devuelto,
+            "detalle": productos_devueltos
+        },
+        "ordenes_liberadas": ordenes_liberadas
+    }
+
+

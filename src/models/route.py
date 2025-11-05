@@ -22,6 +22,11 @@ class Route(Base):
 
     inicio_timestamp: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     fin_timestamp: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # 🆕 NUEVOS CAMPOS PARA CANCELACIÓN
+    cancelada_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    motivo_cancelacion: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     creado_en: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     # Relaciones

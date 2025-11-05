@@ -120,10 +120,9 @@ class RoutePDFGenerator:
         clientes = self.route_data['resumen_clientes']
         inventario = self.route_data['resumen_inventario']
 
-
         # Datos para la tabla de resumen
         data = [
-            # Encabezados - Usando strings simples en lugar de Paragraph
+            # Encabezados
             ['RESUMEN FINANCIERO', 'CLIENTES', 'INVENTARIO'],
             # Valores
             [
@@ -197,19 +196,19 @@ class RoutePDFGenerator:
         }
         return estados_map.get(estado, estado.replace('_', ' ').upper())
 
-
     def _create_clients_table(self, styles) -> List:
         """Crea tabla detallada de clientes."""
         elements = []
 
         # Encabezado de sección
-        elements.append(Paragraph("DETALLE POR CLIENTE", styles['SectionHeader']))
+        section_header = Paragraph("DETALLE POR CLIENTE", styles['SectionHeader'])
+        elements.append(section_header)
         elements.append(Spacer(1, 0.1 * inch))
 
         # Datos
         clientes = self.route_data['clientes']
 
-        # Encabezados - Usando strings simples en lugar de Paragraph
+        # Encabezados
         headers = ['Cliente', 'Estado', 'Esperado', 'Entregado', 'Diferencia']
 
         # Filas
@@ -226,7 +225,6 @@ class RoutePDFGenerator:
                 estado_color = 'red'
 
             estado_formateado = self._format_estado(cliente['estado_entrega'])
-
 
             rows.append([
                 Paragraph(cliente['cliente_nombre'], styles['CellText']),
@@ -266,56 +264,109 @@ class RoutePDFGenerator:
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8f9fa')])
         ]))
 
-        elements.append(table)
+        # Envolver tabla en KeepTogether para evitar cortes
+        elements.append(KeepTogether(table))
         elements.append(Spacer(1, 0.3 * inch))
 
         return elements
 
     def _create_inventory_table(self, styles) -> List:
-        """Crea tabla de inventario."""
+        """Crea tabla de inventario con manejo de páginas."""
         elements = []
 
         # Encabezado
-        elements.append(Paragraph("INVENTARIO DE PRODUCTOS", styles['SectionHeader']))
-        elements.append(Spacer(1, 0.1 * inch))
+        section_header = Paragraph("INVENTARIO DE PRODUCTOS", styles['SectionHeader'])
 
         # Datos
         productos = self.route_data['resumen_inventario']['productos']
 
-        # Headers - Usando strings simples en lugar de Paragraph
+        # Headers
         headers = ['Producto', 'Cargado', 'Entregado', 'Devuelto', '% Vendido']
 
-        rows = [headers]
-        for prod in productos:
-            rows.append([
-                Paragraph(prod['producto_nombre'], styles['CellText']),
-                Paragraph(str(prod['cantidad_cargada']), styles['CellText']),
-                Paragraph(str(prod['cantidad_entregada']), styles['CellText']),
-                Paragraph(str(prod['cantidad_devuelta']), styles['CellText']),
-                Paragraph(f"{prod['porcentaje_vendido']}%", styles['CellText'])
-            ])
+        # Si hay muchos productos, dividir en tablas más pequeñas
+        MAX_ROWS_PER_TABLE = 15  # Máximo de filas por tabla antes de hacer salto
 
-        # Tabla
-        table = Table(rows, colWidths=[2.5*inch, 1*inch, 1*inch, 1*inch, 1.4*inch])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#10367d')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('TOPPADDING', (0, 0), (-1, 0), 12),
+        if len(productos) <= MAX_ROWS_PER_TABLE:
+            # Si cabe en una sola tabla
+            rows = [headers]
+            for prod in productos:
+                rows.append([
+                    Paragraph(prod['producto_nombre'], styles['CellText']),
+                    Paragraph(str(prod['cantidad_cargada']), styles['CellText']),
+                    Paragraph(str(prod['cantidad_entregada']), styles['CellText']),
+                    Paragraph(str(prod['cantidad_devuelta']), styles['CellText']),
+                    Paragraph(f"{prod['porcentaje_vendido']}%", styles['CellText'])
+                ])
 
-            ('BACKGROUND', (0, 1), (-1, -1), colors.white),
-            ('ALIGN', (0, 1), (-1, -1), 'CENTER'),
-            ('FONTSIZE', (0, 1), (-1, -1), 9),
-            ('TOPPADDING', (0, 1), (-1, -1), 8),
-            ('BOTTOMPADDING', (0, 1), (-1, -1), 8),
+            table = Table(rows, colWidths=[2.5*inch, 1*inch, 1*inch, 1*inch, 1.4*inch])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#10367d')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('TOPPADDING', (0, 0), (-1, 0), 12),
 
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8f9fa')])
-        ]))
+                ('BACKGROUND', (0, 1), (-1, -1), colors.white),
+                ('ALIGN', (0, 1), (-1, -1), 'CENTER'),
+                ('FONTSIZE', (0, 1), (-1, -1), 9),
+                ('TOPPADDING', (0, 1), (-1, -1), 8),
+                ('BOTTOMPADDING', (0, 1), (-1, -1), 8),
 
-        elements.append(table)
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8f9fa')])
+            ]))
+
+            # Mantener header y tabla juntos
+            elements.append(KeepTogether([
+                section_header,
+                Spacer(1, 0.1 * inch),
+                table
+            ]))
+        else:
+            # Dividir en múltiples tablas
+            elements.append(section_header)
+            elements.append(Spacer(1, 0.1 * inch))
+
+            for i in range(0, len(productos), MAX_ROWS_PER_TABLE):
+                chunk = productos[i:i + MAX_ROWS_PER_TABLE]
+                rows = [headers]
+
+                for prod in chunk:
+                    rows.append([
+                        Paragraph(prod['producto_nombre'], styles['CellText']),
+                        Paragraph(str(prod['cantidad_cargada']), styles['CellText']),
+                        Paragraph(str(prod['cantidad_entregada']), styles['CellText']),
+                        Paragraph(str(prod['cantidad_devuelta']), styles['CellText']),
+                        Paragraph(f"{prod['porcentaje_vendido']}%", styles['CellText'])
+                    ])
+
+                table = Table(rows, colWidths=[2.5*inch, 1*inch, 1*inch, 1*inch, 1.4*inch])
+                table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#10367d')),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('TOPPADDING', (0, 0), (-1, 0), 12),
+
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.white),
+                    ('ALIGN', (0, 1), (-1, -1), 'CENTER'),
+                    ('FONTSIZE', (0, 1), (-1, -1), 9),
+                    ('TOPPADDING', (0, 1), (-1, -1), 8),
+                    ('BOTTOMPADDING', (0, 1), (-1, -1), 8),
+
+                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8f9fa')])
+                ]))
+
+                elements.append(KeepTogether(table))
+
+                # Si no es el último chunk, agregar salto de página
+                if i + MAX_ROWS_PER_TABLE < len(productos):
+                    elements.append(PageBreak())
+                else:
+                    elements.append(Spacer(1, 0.2 * inch))
 
         return elements
 
@@ -360,7 +411,12 @@ class RoutePDFGenerator:
             # 3. Tabla de clientes
             elements.extend(self._create_clients_table(styles))
 
-            # 4. Tabla de inventario
+            # 4. Salto de página antes del inventario si es necesario
+            # (opcional, pero ayuda a mantener el inventario en páginas limpias)
+            if len(self.route_data['resumen_inventario']['productos']) > 10:
+                elements.append(PageBreak())
+
+            # 5. Tabla de inventario
             elements.extend(self._create_inventory_table(styles))
 
             # Construir PDF

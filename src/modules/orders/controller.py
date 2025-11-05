@@ -16,7 +16,8 @@ from src.modules.orders.service import (
     get_orders_by_date,
     export_orders_to_excel,
     export_orders_to_pdf,
-    cancel_order
+    cancel_order,
+
 )
 from src.utils.date_parser import format_datetime_for_display
 from db.deps import get_db
@@ -41,7 +42,12 @@ def api_create_order(
 ):
     """
     Crea una orden individual de cliente y RESERVA el stock.
+
+    **IMPORTANTE:** La fecha de entrega debe ser al menos 1 día posterior a hoy.
+
     **Formato de fecha:** DD/MM/YYYY
+
+    **Ejemplo:** Si hoy es 02/11/2025, la fecha mínima permitida es 03/11/2025
     """
     try:
         order = create_order(db, order_data)
@@ -56,7 +62,7 @@ def api_create_order(
                 "prioridad": order.prioridad,
                 "asignada": order.asignada,
                 "cancelada": order.cancelada,
-                "fecha_solicitud": format_datetime_for_display(order.fecha_solicitud)  # 🔥 DD/MM/YYYY
+                "fecha_solicitud": format_datetime_for_display(order.fecha_solicitud)
             }
         )
 
@@ -428,7 +434,12 @@ def api_update_order(
 ):
     """
     Actualiza una orden existente.
+
+    **IMPORTANTE:** Si actualiza la fecha, debe ser al menos 1 día posterior a hoy.
+
     **Formato de fecha:** DD/MM/YYYY
+
+    **Ejemplo:** Si hoy es 02/11/2025, la fecha mínima permitida es 03/11/2025
     """
     try:
         existing_order = get_order(db, order_id)
@@ -449,7 +460,7 @@ def api_update_order(
                 "prioridad": updated_order.prioridad,
                 "asignada": updated_order.asignada,
                 "cancelada": updated_order.cancelada,
-                "fecha_solicitud": format_datetime_for_display(updated_order.fecha_solicitud)  # 🔥 DD/MM/YYYY
+                "fecha_solicitud": format_datetime_for_display(updated_order.fecha_solicitud)
             }
         )
 
@@ -460,6 +471,7 @@ def api_update_order(
         db.rollback()
         logger.exception(f"Error updating order {order_id}")
         return HttpResponse.internal_server_error(error="Error al actualizar la orden")
+
 
 @router.delete(
     "/{order_id}/cancel",

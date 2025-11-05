@@ -81,11 +81,11 @@ CREATE TABLE productos (
     nombre NVARCHAR(120) UNIQUE NOT NULL,
     precio DECIMAL(10,2) NOT NULL,
     stock_total INT DEFAULT 0 NOT NULL,
-    stock_reservado INT DEFAULT 0 NOT NULL,  -- 🆕 Stock reservado por órdenes pendientes
+    stock_reservado INT DEFAULT 0 NOT NULL,
     activo BIT DEFAULT 1,
     creado_en DATETIME DEFAULT GETDATE(),
 
-    -- 🛡️ Constraint: stock_reservado no puede exceder stock_total
+
     CONSTRAINT CK_stock_reservado_valido CHECK (stock_reservado >= 0 AND stock_reservado <= stock_total)
 );
 
@@ -96,12 +96,14 @@ CREATE TABLE productos (
 CREATE TABLE rutas (
     id INT IDENTITY(1,1) PRIMARY KEY,
     nombre NVARCHAR(120) NOT NULL,
-    vendedor_id INT NOT NULL,   -- referencia al vendedor
-    almacen_id INT NOT NULL,    -- referencia al almacén de inicio
-    fecha DATE NOT NULL,        -- fecha planificada de la ruta
-    estado NVARCHAR(20) CHECK (estado IN ('pendiente', 'en_proceso', 'completada')) DEFAULT 'pendiente',
-    inicio_timestamp DATETIME NULL,  -- se llena cuando vendedor comienza la ruta
-    fin_timestamp DATETIME NULL,     -- se llena cuando vendedor termina la ruta
+    vendedor_id INT NOT NULL,
+    almacen_id INT NOT NULL,
+    fecha DATE NOT NULL,
+    estado NVARCHAR(20) CHECK (estado IN ('pendiente', 'en_proceso', 'completada', 'cancelada')) DEFAULT 'pendiente',
+    inicio_timestamp DATETIME NULL,
+    fin_timestamp DATETIME NULL,
+    cancelada_en DATETIME NULL,
+    motivo_cancelacion NVARCHAR(255) NULL,
     creado_en DATETIME DEFAULT GETDATE(),
     FOREIGN KEY (vendedor_id) REFERENCES usuarios(id),
     FOREIGN KEY (almacen_id) REFERENCES almacenes(id)
@@ -115,10 +117,10 @@ CREATE TABLE ruta_detalle (
     id INT IDENTITY(1,1) PRIMARY KEY,
     ruta_id INT NOT NULL,
     cliente_id INT NOT NULL,
-    orden INT NOT NULL,  -- orden en que se visitará al cliente
+    orden INT NOT NULL,
     estado_entrega NVARCHAR(20) CHECK (estado_entrega IN ('entregado', 'no_entregado')) DEFAULT 'no_entregado',
-    motivo NVARCHAR(255) NULL,        -- si no se entrega, se registra el motivo
-    timestamp_entrega DATETIME NULL,   -- se llena cuando se registra entrega
+    motivo NVARCHAR(255) NULL,
+    timestamp_entrega DATETIME NULL,
     creado_en DATETIME DEFAULT GETDATE(),
     FOREIGN KEY (ruta_id) REFERENCES rutas(id) ON DELETE CASCADE,
     FOREIGN KEY (cliente_id) REFERENCES clientes(id)
@@ -132,12 +134,12 @@ CREATE TABLE ordenes (
     id INT IDENTITY(1,1) PRIMARY KEY,
     cliente_id INT NOT NULL,
     producto_id INT NOT NULL,
-    producto_nombre_snapshot NVARCHAR(120) NULL,  -- Snapshot del nombre del producto
+    producto_nombre_snapshot NVARCHAR(120) NULL,
     cantidad INT NOT NULL,
     prioridad NVARCHAR(20) DEFAULT 'normal' CHECK (prioridad IN ('alta','normal','baja')),
     fecha_solicitud DATETIME DEFAULT GETDATE(),
-    asignada BIT DEFAULT 0,  -- True si ya está en una ruta
-    cancelada BIT DEFAULT 0,  -- 🆕 True si la orden fue cancelada
+    asignada BIT DEFAULT 0,
+    cancelada BIT DEFAULT 0,
     ruta_id INT NULL,
     creado_en DATETIME DEFAULT GETDATE(),
 
@@ -198,6 +200,7 @@ CREATE INDEX idx_rutas_estado ON rutas(estado);
 CREATE INDEX idx_rutas_fecha ON rutas(fecha);
 CREATE INDEX idx_rutas_vendedor ON rutas(vendedor_id);
 CREATE INDEX idx_rutas_almacen ON rutas(almacen_id);
+CREATE INDEX idx_rutas_cancelada ON rutas(cancelada_en);
 
 -- Índices para tabla ruta_detalle
 CREATE INDEX idx_ruta_detalle_ruta ON ruta_detalle(ruta_id);
