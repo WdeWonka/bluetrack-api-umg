@@ -10,6 +10,9 @@ Gestiona inventarios, distribución de agua, autenticación JWT y conexión a SQ
 
 ---
 
+## Frontend url
+https://github.com/WdeWonka/bluetrack-front-umg
+
 ## Project Status
 
 Bluetrack API se encuentra en **versión estable inicial**.  
